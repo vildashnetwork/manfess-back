@@ -7,7 +7,8 @@ import env from "dotenv"
 import marks from "./routes/mark.js"
 import schoolclass from "./routes/schoolclass.js"
 import student from "./routes/student.js"
-import user from "./routes/student.js"
+import user from "./routes/user.js"
+import subject from "./routes/subject.js"
 import cors from "cors";
 import jwt from "jsonwebtoken";
 import helmet from "helmet";
@@ -93,6 +94,12 @@ app.use("/api/marks", marks);
 app.use("/api/class", schoolclass);
 app.use("/api/student", student);
 app.use("/api/user", user);
+app.use("/api/subject", subject);
+
+
+
+import jwt from "jsonwebtoken";
+
 
 connectdb().then(() => {
     app.listen(PORT, '0.0.0.0', () => {
