@@ -613,16 +613,14 @@ router.put("/students/:id", async (req, res) => {
         }
 
         // Check for duplicate if fullName or parentPhone is changing
-        if (studentData.fullName || studentData.parentPhone) {
+        if (studentData.fullName) {
             const checkFields = {
-                fullName: studentData.fullName || existingStudent.fullName,
-                parentPhone: studentData.parentPhone || existingStudent.parentPhone
+                fullName: studentData.fullName || existingStudent.fullName
             };
 
             const duplicateCheck = await Student.findOne({
                 _id: { $ne: id },
-                fullName: checkFields.fullName,
-                parentPhone: checkFields.parentPhone
+                fullName: checkFields.fullName
             });
 
             if (duplicateCheck) {
