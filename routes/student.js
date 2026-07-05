@@ -413,7 +413,6 @@ router.post("/students", async (req, res) => {
         // You can check by parentPhone and fullName combination
         const existingStudent = await Student.findOne({
             fullName: studentData.fullName,
-            parentPhone: studentData.parentPhone
         });
 
         if (existingStudent) {
