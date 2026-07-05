@@ -97,10 +97,6 @@ app.use("/api", user);
 app.use("/api", subject);
 
 
-
-import jwt from "jsonwebtoken";
-
-
 connectdb().then(() => {
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`${SERVICE_NAME} server running on port ${PORT}`);
