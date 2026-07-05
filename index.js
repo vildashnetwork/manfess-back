@@ -23,13 +23,50 @@ const MONGOURL = process.env.MONGOURI;
 
 const connectdb = async () => {
     try {
-        const conn = await mongoose.connect(MONGOURL);
-        console.log(`MongoDB Connected: ${conn.connection.host}`);
-
+        // Clean the URL by removing any write concern parameters
+        let cleanUrl = MONGOURL;
+        
+        // Remove any query parameters that might cause issues
+        if (cleanUrl.includes('?')) {
+            const urlParts = cleanUrl.split('?');
+            cleanUrl = urlParts[0];
+            console.log('Removed query parameters from MongoDB URL');
+        }
+        
+        // Also remove any trailing slashes
+        cleanUrl = cleanUrl.replace(/\/+$/, '');
+        
+        console.log('Connecting to MongoDB...');
+        
+        const conn = await mongoose.connect(cleanUrl, {
+            // Explicitly set write concern to avoid any issues
+            writeConcern: {
+                w: 'majority'
+            }
+        });
+        
+        console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+        console.log(`📊 Database: ${conn.connection.name}`);
+        
+        // Handle connection events
+        mongoose.connection.on('error', (err) => {
+            console.error('MongoDB connection error:', err);
+        });
+        
+        mongoose.connection.on('disconnected', () => {
+            console.log('MongoDB disconnected');
+        });
+        
+        mongoose.connection.on('reconnected', () => {
+            console.log('MongoDB reconnected');
+        });
+        
     } catch (err) {
-        console.log(err)
+        console.error('❌ MongoDB Connection Error:', err.message);
+        console.log('Retrying connection in 5 seconds...');
+        setTimeout(connectdb, 5000);
     }
-}
+};
 
 // Middleware
 app.use(express.json());
