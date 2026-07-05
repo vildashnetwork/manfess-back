@@ -19,11 +19,11 @@ const SubjectSchema = new mongoose.Schema({
     },
     classIds: {
         type: [String],
-        required: true
+        default: []
     },
     teacherIds: {
         type: [String],
-        required: true
+        default: []
     }
 }, { timestamps: true })
 

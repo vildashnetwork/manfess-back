@@ -20,7 +20,7 @@ const schoolClassSchema = new mongoose.Schema({
     },
     classMasterId: {
         type: String,
-        required: true
+        
     }
 }, { timestamps: true });
 
