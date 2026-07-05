@@ -592,6 +592,7 @@ router.post("/students/:id/pay-fees", async (req, res) => {
 // ==================== PUT ROUTES ====================
 
 // PUT - Update an entire student
+// PUT - Update an entire student
 router.put("/students/:id", async (req, res) => {
     try {
         const { id } = req.params;
@@ -612,24 +613,63 @@ router.put("/students/:id", async (req, res) => {
             });
         }
 
-        // Check for duplicate if fullName or parentPhone is changing
-        if (studentData.fullName) {
-            const checkFields = {
-                fullName: studentData.fullName || existingStudent.fullName
-            };
+        // Remove the duplicate check entirely
+        // Students can have the same name and parent phone (siblings)
 
-            const duplicateCheck = await Student.findOne({
-                _id: { $ne: id },
-                fullName: checkFields.fullName
-            });
-
-            if (duplicateCheck) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Another student already exists with this name and parent phone"
-                });
+        const updatedStudent = await Student.findByIdAndUpdate(
+            id,
+            studentData,
+            {
+                new: true,
+                runValidators: true
             }
+        );
+
+        res.status(200).json({
+            success: true,
+            message: "Student updated successfully",
+            data: updatedStudent
+        });
+    } catch (error) {
+        if (error.name === "ValidationError") {
+            const errors = Object.values(error.errors).map(err => err.message);
+            return res.status(400).json({
+                success: false,
+                message: "Validation error",
+                errors: errors
+            });
         }
+
+        res.status(500).json({
+            success: false,
+            message: "Error updating student",
+            error: error.message
+        });
+    }
+});
+
+// PATCH - Partially update a student
+router.patch("/students/:id", async (req, res) => {
+    try {
+        const { id } = req.params;
+        const studentData = req.body;
+
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid student ID format"
+            });
+        }
+
+        const existingStudent = await Student.findById(id);
+        if (!existingStudent) {
+            return res.status(404).json({
+                success: false,
+                message: "Student not found"
+            });
+        }
+
+        // Remove the duplicate check entirely
 
         const updatedStudent = await Student.findByIdAndUpdate(
             id,
