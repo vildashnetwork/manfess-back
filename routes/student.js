@@ -1,6 +1,6 @@
 import express from "express";
 import mongoose from "mongoose";
-import Student from "../models/Students.js"; // Adjust the path as needed
+import Student from "../models/Students.js";
 
 const router = express.Router();
 
@@ -313,33 +313,21 @@ router.get("/students/stats/summary", async (req, res) => {
     try {
         const students = await Student.find();
 
-        // Count by gender
-        const genderCount = {
-            male: 0,
-            female: 0
-        };
+        const genderCount = { male: 0, female: 0 };
+        const classCount = {};
+        const departmentCount = {};
+
         students.forEach(student => {
             if (student.gender === 'male') genderCount.male++;
             else if (student.gender === 'female') genderCount.female++;
-        });
 
-        // Count by class
-        const classCount = {};
-        students.forEach(student => {
             classCount[student.classId] = (classCount[student.classId] || 0) + 1;
-        });
-
-        // Count by department
-        const departmentCount = {};
-        students.forEach(student => {
             departmentCount[student.department] = (departmentCount[student.department] || 0) + 1;
         });
 
-        // Fee statistics
         const totalFeesPaid = students.reduce((sum, student) => sum + student.feesPaid, 0);
         const totalFeesDue = students.reduce((sum, student) => sum + student.feesDue, 0);
         const totalFees = totalFeesPaid + totalFeesDue;
-
         const studentsWithOutstandingFees = students.filter(s => s.feesDue > 0).length;
         const fullyPaidStudents = students.filter(s => s.feesDue === 0).length;
 
@@ -409,16 +397,16 @@ router.post("/students", async (req, res) => {
     try {
         const studentData = req.body;
 
-        // Check if student already exists (optional - you may want to use a unique identifier)
-        // You can check by parentPhone and fullName combination
+        // Only check for exact duplicate (same name AND same parent phone)
         const existingStudent = await Student.findOne({
             fullName: studentData.fullName,
+            parentPhone: studentData.parentPhone
         });
 
         if (existingStudent) {
             return res.status(400).json({
                 success: false,
-                message: "Student already exists with this name and parent phone"
+                message: "A student with this exact name and parent phone already exists"
             });
         }
 
@@ -460,7 +448,6 @@ router.post("/students/bulk", async (req, res) => {
             });
         }
 
-        // Validate each student
         const validationErrors = [];
         const validStudents = [];
 
@@ -491,7 +478,6 @@ router.post("/students/bulk", async (req, res) => {
             });
         }
 
-        // Check for duplicates in database
         const duplicateChecks = validStudents.map(s => ({
             fullName: s.fullName,
             parentPhone: s.parentPhone
@@ -556,12 +542,10 @@ router.post("/students/:id/pay-fees", async (req, res) => {
             });
         }
 
-        // Update fees
         const paymentAmount = parseFloat(amount);
         let remainingDue = student.feesDue - paymentAmount;
 
         if (remainingDue < 0) {
-            // If overpayment, add to feesPaid and set feesDue to 0
             student.feesPaid += paymentAmount;
             student.feesDue = 0;
         } else {
@@ -592,7 +576,6 @@ router.post("/students/:id/pay-fees", async (req, res) => {
 // ==================== PUT ROUTES ====================
 
 // PUT - Update an entire student
-// PUT - Update an entire student
 router.put("/students/:id", async (req, res) => {
     try {
         const { id } = req.params;
@@ -613,64 +596,7 @@ router.put("/students/:id", async (req, res) => {
             });
         }
 
-        // Remove the duplicate check entirely
-        // Students can have the same name and parent phone (siblings)
-
-        const updatedStudent = await Student.findByIdAndUpdate(
-            id,
-            studentData,
-            {
-                new: true,
-                runValidators: true
-            }
-        );
-
-        res.status(200).json({
-            success: true,
-            message: "Student updated successfully",
-            data: updatedStudent
-        });
-    } catch (error) {
-        if (error.name === "ValidationError") {
-            const errors = Object.values(error.errors).map(err => err.message);
-            return res.status(400).json({
-                success: false,
-                message: "Validation error",
-                errors: errors
-            });
-        }
-
-        res.status(500).json({
-            success: false,
-            message: "Error updating student",
-            error: error.message
-        });
-    }
-});
-
-// PATCH - Partially update a student
-router.patch("/students/:id", async (req, res) => {
-    try {
-        const { id } = req.params;
-        const studentData = req.body;
-
-        if (!mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid student ID format"
-            });
-        }
-
-        const existingStudent = await Student.findById(id);
-        if (!existingStudent) {
-            return res.status(404).json({
-                success: false,
-                message: "Student not found"
-            });
-        }
-
-        // Remove the duplicate check entirely
-
+        // No duplicate check needed for update since students can have same name/parent
         const updatedStudent = await Student.findByIdAndUpdate(
             id,
             studentData,
@@ -705,7 +631,7 @@ router.patch("/students/:id", async (req, res) => {
 
 // ==================== PATCH ROUTES ====================
 
-// PATCH - Partially update a student
+// PATCH - Partially update a student (SINGLE VERSION - REMOVED DUPLICATE)
 router.patch("/students/:id", async (req, res) => {
     try {
         const { id } = req.params;
@@ -726,27 +652,7 @@ router.patch("/students/:id", async (req, res) => {
             });
         }
 
-        // Check for duplicate if fullName or parentPhone is changing
-        if (studentData.fullName || studentData.parentPhone) {
-            const checkFields = {
-                fullName: studentData.fullName || existingStudent.fullName,
-                parentPhone: studentData.parentPhone || existingStudent.parentPhone
-            };
-
-            const duplicateCheck = await Student.findOne({
-                _id: { $ne: id },
-                fullName: checkFields.fullName,
-                parentPhone: checkFields.parentPhone
-            });
-
-            if (duplicateCheck) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Another student already exists with this name and parent phone"
-                });
-            }
-        }
-
+        // No duplicate check - students can have same name/parent phone
         const updatedStudent = await Student.findByIdAndUpdate(
             id,
             studentData,
@@ -990,7 +896,6 @@ router.delete("/students/outstanding-fees", async (req, res) => {
 // DELETE - Delete all students (use with extreme caution)
 router.delete("/students", async (req, res) => {
     try {
-        // Add authorization check in production
         const result = await Student.deleteMany({});
 
         res.status(200).json({
