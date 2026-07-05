@@ -61,7 +61,7 @@ app.use(cors({
 }));
 
 const ip = getIP();
-const PORT = 5000;                       // changed from 3000 to 5000
+const PORT = 5000 | process.env.PORT;                       // changed from 3000 to 5000
 const SERVICE_NAME = 'Manfess';
 const HOSTNAME = 'manfess';              // desired hostname
 
