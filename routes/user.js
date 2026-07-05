@@ -363,4 +363,59 @@ router.delete("/users", async (req, res) => {
     }
 });
 
+
+router.post("/login", async (req, res) => {
+    try {
+        const { username } = req.body;
+
+        // Validate input
+        if (!username) {
+            return res.status(400).json({
+                success: false,
+                message: "Username is required"
+            });
+        }
+
+        // Find user by username
+        const user = await User.findOne({ username: username.trim() });
+
+        if (!user) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid username"
+            });
+        }
+
+        // Since there's no password, username acts as both username and password
+        // The user is authenticated if they exist
+
+        // Return user data (excluding sensitive fields if any)
+        res.status(200).json({
+            success: true,
+            message: "Login successful",
+            data: {
+                id: user._id,
+                name: user.name,
+                username: user.username,
+                phone: user.phone,
+                role: user.role,
+                qualification: user.qualification,
+                subjectIds: user.subjectIds,
+                classIds: user.classIds,
+                acedemicYear: user.acedemicYear,
+                createdAt: user.createdAt,
+                updatedAt: user.updatedAt
+            }
+        });
+    } catch (error) {
+        console.error("Login error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Error during login",
+            error: error.message
+        });
+    }
+});
+
+
 export default router;
