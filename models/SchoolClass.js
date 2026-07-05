@@ -19,12 +19,12 @@ const schoolClassSchema = new mongoose.Schema({
         required: [true, "Cycle is required"],
         trim: true
     },
-    academicYear: {
+    acedemicYear: {
         type: String,
         required: [true, "Academic year is required"],
         trim: true,
         validate: {
-            validator: function(v) {
+            validator: function (v) {
                 return /^\d{4}-\d{4}$/.test(v);
             },
             message: props => `${props.value} is not a valid academic year format. Use YYYY-YYYY`
@@ -53,14 +53,14 @@ const schoolClassSchema = new mongoose.Schema({
         enum: ["A", "B", "C", "D"],
         default: "A"
     }
-}, { 
+}, {
     timestamps: true,
     toJSON: { virtuals: true },
     toObject: { virtuals: true }
 });
 
 // Virtual for full class name (e.g., "Form 5 Science A")
-schoolClassSchema.virtual('fullName').get(function() {
+schoolClassSchema.virtual('fullName').get(function () {
     let name = this.className;
     if (this.department) {
         name += ` ${this.department}`;
@@ -72,7 +72,7 @@ schoolClassSchema.virtual('fullName').get(function() {
 });
 
 // Virtual for class level (numeric value for sorting)
-schoolClassSchema.virtual('level').get(function() {
+schoolClassSchema.virtual('level').get(function () {
     const levels = {
         "Form 1": 1,
         "Form 2": 2,
@@ -86,40 +86,41 @@ schoolClassSchema.virtual('level').get(function() {
     return levels[this.className] || 0;
 });
 
-// Index for faster queries
-schoolClassSchema.index({ className: 1, department: 1, academicYear: 1 });
+// Index for faster queries - FIXED: use acedemicYear instead of academicYear
+schoolClassSchema.index({ className: 1, department: 1, acedemicYear: 1 });
 schoolClassSchema.index({ classMasterId: 1 });
-schoolClassSchema.index({ academicYear: 1 });
+schoolClassSchema.index({ acedemicYear: 1 });
 schoolClassSchema.index({ isActive: 1 });
 
-// Pre-save middleware to ensure data consistency
-schoolClassSchema.pre('save', function(next) {
+// ============ FIXED: Pre-save middleware ============
+// Removed the problematic next parameter - using async/await instead
+schoolClassSchema.pre('save', async function () {
     // Auto-set cycle based on className if not provided
     if (!this.cycle) {
         const lowerClasses = ["Form 1", "Form 2", "Form 3", "Form 4"];
         const upperClasses = ["Form 5", "Lower 6th", "Upper 6th"];
-        
+
         if (lowerClasses.includes(this.className)) {
             this.cycle = "1st Cycle";
         } else if (upperClasses.includes(this.className)) {
             this.cycle = "2nd Cycle";
+        } else {
+            // For Graduated or other classes, default to "2nd Cycle"
+            this.cycle = "2nd Cycle";
         }
     }
-    next();
 });
 
-// Static method to find classes by academic year
-schoolClassSchema.statics.findByAcademicYear = function(year) {
-    return this.find({ academicYear: year }).sort({ className: 1, department: 1 });
+// ============ FIXED: Static Methods - use acedemicYear ============
+schoolClassSchema.statics.findByAcademicYear = function (year) {
+    return this.find({ acedemicYear: year }).sort({ className: 1, department: 1 });
 };
 
-// Static method to find active classes
-schoolClassSchema.statics.findActive = function() {
+schoolClassSchema.statics.findActive = function () {
     return this.find({ isActive: true }).sort({ className: 1, department: 1 });
 };
 
-// Static method to get class statistics
-schoolClassSchema.statics.getClassStats = async function() {
+schoolClassSchema.statics.getClassStats = async function () {
     const stats = await this.aggregate([
         {
             $group: {
@@ -128,7 +129,7 @@ schoolClassSchema.statics.getClassStats = async function() {
                     department: "$department"
                 },
                 count: { $sum: 1 },
-                academicYears: { $addToSet: "$academicYear" }
+                academicYears: { $addToSet: "$acedemicYear" }
             }
         },
         {
@@ -141,13 +142,12 @@ schoolClassSchema.statics.getClassStats = async function() {
     return stats;
 };
 
-// Instance method to check if class is full
-schoolClassSchema.methods.isFull = function() {
+// Instance methods
+schoolClassSchema.methods.isFull = function () {
     return this.studentCount >= this.maxStudents;
 };
 
-// Instance method to get available slots
-schoolClassSchema.methods.getAvailableSlots = function() {
+schoolClassSchema.methods.getAvailableSlots = function () {
     return Math.max(0, this.maxStudents - this.studentCount);
 };
 
