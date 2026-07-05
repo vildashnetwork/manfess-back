@@ -90,11 +90,11 @@ app.get("/", (req, res) => {
 
 
 //all routes 
-app.use("/api/marks", marks);
-app.use("/api/class", schoolclass);
-app.use("/api/student", student);
-app.use("/api/user", user);
-app.use("/api/subject", subject);
+app.use("/api", marks);
+app.use("/api", schoolclass);
+app.use("/api", student);
+app.use("/api", user);
+app.use("/api", subject);
 
 
 
