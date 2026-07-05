@@ -405,6 +405,7 @@ router.post("/students/:id/pay-fees", async (req, res) => {
 // ==================== PUT ROUTES ====================
 
 // PUT - Update an entire student (NO DUPLICATE CHECK)
+// PUT - Update an entire student
 router.put("/students/:id", async (req, res) => {
     try {
         const { id } = req.params;
@@ -425,7 +426,7 @@ router.put("/students/:id", async (req, res) => {
             });
         }
 
-        // NO DUPLICATE CHECK - Students can have same name and parent phone
+        // NO DUPLICATE CHECK - Just update
         const updatedStudent = await Student.findByIdAndUpdate(
             id,
             studentData,
