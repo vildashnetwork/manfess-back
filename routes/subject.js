@@ -311,14 +311,6 @@ router.post("/subjects", async (req, res) => {
             });
         }
 
-        // Check if subject name already exists (optional, but good practice)
-        const existingName = await Subject.findOne({ name: subjectData.name });
-        if (existingName) {
-            return res.status(400).json({
-                success: false,
-                message: "Subject with this name already exists"
-            });
-        }
 
         const subject = new Subject(subjectData);
         await subject.save();
