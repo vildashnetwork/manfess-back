@@ -133,7 +133,7 @@ app.use(morgan(":method :url :status :response-time ms - :res[content-length]"))
 
 // CORS middleware
 const allowedOrigins = [
-    "http://localhost:8081",
+    "https://manfess-brand.vercel.app",
     "http://localhost:8080",
     "http://localhost:5173",
     "http://localhost:3000",
