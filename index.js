@@ -13,6 +13,9 @@ import schoolclass from "./routes/schoolclass.js";
 import student from "./routes/student.js";
 import user from "./routes/user.js";
 import subject from "./routes/subject.js";
+import timetableRoutes from './routes/timetable.js';
+import teacherAttendanceRoutes from './routes/teacherAttendance.js';
+import teacherSalaryRoutes from './routes/teacherSalary.js';
 
 // Load environment variables
 dotenv.config();
@@ -223,6 +226,9 @@ app.use("/api", student);
 app.use("/api", user);
 app.use("/api", subject);
 
+app.use("/api", timetableRoutes);
+app.use("/api", teacherAttendanceRoutes);
+app.use("/api", teacherSalaryRoutes);
 // 404 handler for undefined routes
 app.use((req, res) => {
     res.status(404).json({
