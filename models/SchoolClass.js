@@ -4,7 +4,7 @@ import { syncTombstonePlugin } from "../db/syncPlugin.js";
 const schoolClassSchema = new mongoose.Schema({
     className: {
         type: String,
-        enum: ["Form 1", "Form 2", "Form 3", "Form 4", "Form 5", "Lower 6th", "Upper 6th", "Graduated"],
+        enum: ["Beginers", "level 3", "level 4", "level 5", "Upper 6th", "Graduated"],
         required: [true, "Class name is required"],
         trim: true
     },
