@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { syncTombstonePlugin } from '../db/syncPlugin.js';
 
 const TeacherSalarySchema = new mongoose.Schema({
   teacherId: {
@@ -125,6 +126,9 @@ TeacherSalarySchema.pre('save', function(next) {
   this.netSalary = this.grossSalary - this.deductions.total;
   next();
 });
+
+// Record deletions for the offline/online sync
+TeacherSalarySchema.plugin(syncTombstonePlugin);
 
 const TeacherSalary = mongoose.model('TeacherSalary', TeacherSalarySchema);
 

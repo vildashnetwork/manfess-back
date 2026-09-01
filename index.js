@@ -1,13 +1,12 @@
+import 'dotenv/config';
 import express from "express";
 import os from "os";
 import Bonjour from 'bonjour';
 import mongoose from "mongoose";
-import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
-import dns from "dns";
-import { execFile } from "child_process";
+import { dbManager } from "./db/dbManager.js";
 
 // Import routes
 import marks from "./routes/mark.js";
@@ -18,9 +17,6 @@ import subject from "./routes/subject.js";
 import timetableRoutes from './routes/timetable.js';
 import teacherAttendanceRoutes from './routes/teacherAttendance.js';
 import teacherSalaryRoutes from './routes/teacherSalary.js';
-
-// Load environment variables
-dotenv.config();
 
 // ==================== INITIALIZATION ====================
 const app = express();
@@ -34,178 +30,8 @@ const MONGOURL = process.env.MONGOURI;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
 // ==================== DATABASE CONNECTION ====================
-// NOTE: query parameters are NEVER stripped from the MongoDB URL.
-// Atlas URLs need them (retryWrites, w=majority, authSource, replicaSet, tls...).
-
-const MAX_DB_RETRIES = parseInt(process.env.DB_MAX_RETRIES || '5', 10);
-let standardUriCache = null; // cached SRV -> standard URI conversion
-
-// --- OS-level DNS fallback ------------------------------------------------
-// Some routers/networks refuse the raw UDP SRV queries made by Node's DNS
-// resolver (querySrv ECONNREFUSED / ETIMEOUT) while the OS DNS client still
-// works fine. In that case we ask the operating system to resolve the SRV
-// and TXT records for us and build a standard (non-SRV) connection string.
-const osResolveSrv = (srvName) => {
-    return new Promise((resolve, reject) => {
-        if (process.platform !== 'win32') {
-            return reject(new Error('OS DNS fallback is only implemented for Windows'));
-        }
-        const cmd = `Resolve-DnsName -Type SRV "${srvName}" -ErrorAction Stop | Select-Object NameTarget,Port | ConvertTo-Json -Compress`;
-        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { windowsHide: true, timeout: 15000 }, (err, stdout) => {
-            if (err) return reject(err);
-            try {
-                const parsed = JSON.parse(stdout);
-                const list = Array.isArray(parsed) ? parsed : [parsed];
-                const records = list
-                    .filter((r) => r && r.NameTarget && r.Port)
-                    .map((r) => ({ name: String(r.NameTarget).replace(/\.$/, ''), port: Number(r.Port) }));
-                if (!records.length) return reject(new Error('OS SRV lookup returned no records'));
-                resolve(records);
-            } catch (parseErr) {
-                reject(parseErr);
-            }
-        });
-    });
-};
-
-const osResolveTxt = (host) => {
-    return new Promise((resolve, reject) => {
-        if (process.platform !== 'win32') {
-            return reject(new Error('OS DNS fallback is only implemented for Windows'));
-        }
-        const cmd = `Resolve-DnsName -Type TXT "${host}" -ErrorAction Stop | ForEach-Object { $_.Strings } | ConvertTo-Json -Compress`;
-        execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { windowsHide: true, timeout: 15000 }, (err, stdout) => {
-            if (err) return reject(err);
-            try {
-                const flat = (v) => (Array.isArray(v) ? v.flat(Infinity) : [v]);
-                const text = flat(JSON.parse(stdout)).filter((x) => typeof x === 'string').join('');
-                if (!text) return reject(new Error('OS TXT lookup returned no records'));
-                resolve(text);
-            } catch (parseErr) {
-                reject(parseErr);
-            }
-        });
-    });
-};
-
-// Convert a mongodb+srv:// URI into a standard mongodb:// seed-list URI
-const srvToStandardUri = async (srvUri) => {
-    const match = srvUri.match(/^mongodb\+srv:\/\/([^:/?#]+)(?::([^@/#]*))?@([^/?#]+)(\/[^?#]*)?(\?.*)?$/);
-    if (!match) throw new Error('Could not parse the mongodb+srv:// connection string');
-    const [, user, password, host, dbPath = '', query = ''] = match;
-
-    console.log('🔧 Converting SRV connection string to standard connection string...');
-
-    // 1) SRV lookup -> shard hosts (try Node's resolver first, then the OS)
-    let records;
-    try {
-        records = await dns.promises.resolveSrv(`_mongodb._tcp.${host}`);
-    } catch (err) {
-        console.warn(`⚠️ Node DNS resolver failed for SRV lookup (${err.code || err.message}). Trying OS DNS resolver...`);
-        records = await osResolveSrv(`_mongodb._tcp.${host}`);
-    }
-    const hosts = records.map((r) => `${r.name}:${r.port}`).join(',');
-    console.log(`🔧 Resolved ${records.length} cluster host(s): ${hosts}`);
-
-    // 2) TXT lookup -> default options (authSource, replicaSet). Optional.
-    let txtOptions = '';
-    try {
-        txtOptions = (await dns.promises.resolveTxt(host)).map((parts) => parts.join('')).join('&');
-    } catch {
-        try {
-            txtOptions = await osResolveTxt(host);
-        } catch {
-            // TXT is optional
-        }
-    }
-
-    // 3) Merge options (URI params win over TXT) and force TLS for Atlas
-    const params = new URLSearchParams(query ? query.slice(1) : '');
-    for (const [key, value] of new URLSearchParams(txtOptions)) {
-        if (!params.has(key)) params.set(key, value);
-    }
-    if (!params.has('tls') && !params.has('ssl')) params.set('tls', 'true');
-    if (!params.has('authSource')) params.set('authSource', 'admin');
-
-    return `mongodb://${user}:${password || ''}@${hosts}${dbPath || '/'}?${params.toString()}`;
-};
-
-const getSrvHost = (uri) => {
-    const match = uri.match(/^mongodb\+srv:\/\/(?:[^:/?#]+)(?::[^@/#]*)?@([^/?#]+)/);
-    return match ? match[1] : null;
-};
-
-// Pick the URI to connect with: use the SRV URI when DNS works, otherwise a
-// standard URI built from the resolved cluster hosts (result is cached).
-const getConnectUri = async () => {
-    if (standardUriCache) return standardUriCache;
-
-    const srvHost = MONGOURL.startsWith('mongodb+srv://') ? getSrvHost(MONGOURL) : null;
-    if (srvHost) {
-        try {
-            await dns.promises.resolveSrv(`_mongodb._tcp.${srvHost}`);
-            return MONGOURL; // SRV works normally -> use the URI as-is
-        } catch (err) {
-            console.warn(`⚠️ Node DNS resolver cannot resolve SRV records (${err.code || err.message}).`);
-            standardUriCache = await srvToStandardUri(MONGOURL);
-            return standardUriCache;
-        }
-    }
-    return MONGOURL;
-};
-
-// Mongoose connection event handlers - registered ONCE. Registering them
-// inside connectDB would add duplicate listeners on every retry and cause
-// multiple concurrent mongoose.connect() calls to race each other.
-mongoose.connection.on('connected', () => {
-    console.log('📡 Mongoose: connection established');
-});
-
-mongoose.connection.on('error', (err) => {
-    console.error('❌ MongoDB connection error:', err.message);
-});
-
-mongoose.connection.on('disconnected', () => {
-    console.warn('⚠️ MongoDB disconnected. Mongoose will reconnect automatically...');
-});
-
-mongoose.connection.on('reconnected', () => {
-    console.log('✅ MongoDB reconnected successfully');
-});
-
-const connectDB = async (retryCount = 0) => {
-    if (!MONGOURL) {
-        throw new Error('MONGOURI environment variable is not defined. Add it to your .env file.');
-    }
-
-    try {
-        const uri = await getConnectUri();
-        console.log(` Connecting to MongoDB... (Attempt ${retryCount + 1}/${MAX_DB_RETRIES})`);
-
-        const conn = await mongoose.connect(uri, {
-            serverSelectionTimeoutMS: 10000,
-            socketTimeoutMS: 45000,
-            maxPoolSize: 10,
-            family: 4
-        });
-
-        console.log(` MongoDB Connected: ${conn.connection.host}`);
-        console.log(` Database: ${conn.connection.name}`);
-        console.log(` Connection State: ${conn.connection.readyState === 1 ? 'Connected' : 'Disconnected'}`);
-        return conn;
-    } catch (err) {
-        console.error(`❌ MongoDB Connection Error (Attempt ${retryCount + 1}/${MAX_DB_RETRIES}):`, err.message);
-
-        if (retryCount + 1 < MAX_DB_RETRIES) {
-            const waitTime = Math.min((retryCount + 1) * 2000, 10000);
-            console.log(`🔄 Retrying in ${waitTime / 1000} seconds...`);
-            await new Promise((resolve) => setTimeout(resolve, waitTime));
-            return connectDB(retryCount + 1);
-        }
-
-        throw err; // let startServer decide what to do (offline fallback / exit)
-    }
-};
+// The connection lifecycle (online MongoDB <-> local MongoDB, automatic
+// switching and data sync) lives in db/dbManager.js and db/syncService.js.
 
 // ==================== UTILITY FUNCTIONS ====================
 function getLocalIP() {
@@ -278,6 +104,7 @@ app.use(cors({
 // Health check endpoint
 app.get("/health", (req, res) => {
     const dbState = mongoose.connection.readyState;
+    const dbStatus = dbManager.getStatus();
     const states = {
         0: 'Disconnected',
         1: 'Connected',
@@ -294,6 +121,13 @@ app.get("/health", (req, res) => {
             state: states[dbState] || 'Unknown',
             host: mongoose.connection.host,
             name: mongoose.connection.name
+        },
+        dbMode: dbStatus.mode,
+        sync: {
+            syncing: dbStatus.syncing,
+            offlineAvailable: dbStatus.offlineAvailable,
+            lastSyncAt: dbStatus.lastSyncAt,
+            lastSyncError: dbStatus.lastSyncError
         },
         uptime: process.uptime(),
         memory: process.memoryUsage()
@@ -331,6 +165,34 @@ app.get("/", (req, res) => {
             docs: "/api/docs"
         }
     });
+});
+
+// ==================== SYNC ENDPOINTS ====================
+// Automatic sync runs via db/dbManager.js; these endpoints expose its status
+// and allow a manual sync.
+app.get("/api/sync/status", (req, res) => {
+    res.json({ success: true, sync: dbManager.getStatus() });
+});
+
+app.post("/api/sync", async (req, res, next) => {
+    try {
+        if (dbManager.getStatus().mode !== 'online') {
+            return res.status(409).json({
+                success: false,
+                message: 'Cannot sync while offline. Data will sync automatically when the internet returns.'
+            });
+        }
+        const result = await dbManager.runSyncCycle('manual');
+        if (!result) {
+            return res.status(409).json({
+                success: false,
+                message: 'Sync unavailable (local database unreachable or a sync is already running).'
+            });
+        }
+        res.json({ success: true, message: 'Sync completed', result });
+    } catch (err) {
+        next(err);
+    }
 });
 
 // API routes
@@ -413,29 +275,9 @@ const printDbTroubleshooting = () => {
 
 const startServer = async () => {
     try {
-        // Connect to database (online MongoDB first, automatic SRV fallback)
-        try {
-            await connectDB();
-        } catch (err) {
-            console.error('❌ Could not connect to the online MongoDB cluster:', err.message);
-
-            // Optional offline fallback (opt-in via MONGOURIOFFLINE in .env)
-            const offlineUri = process.env.MONGOURIOFFLINE;
-            if (offlineUri) {
-                console.log(' Attempting offline fallback database (MONGOURIOFFLINE)...');
-                try {
-                    await mongoose.connect(offlineUri, { serverSelectionTimeoutMS: 5000, family: 4 });
-                    console.warn('⚠️ RUNNING IN OFFLINE MODE using MONGOURIOFFLINE');
-                } catch (offlineErr) {
-                    console.error('❌ Offline fallback failed too:', offlineErr.message);
-                    printDbTroubleshooting();
-                    process.exit(1);
-                }
-            } else {
-                printDbTroubleshooting();
-                process.exit(1);
-            }
-        }
+        // Connect to database: online MongoDB <-> local MongoDB with automatic
+        // switching and data sync (see db/dbManager.js).
+        await dbManager.init();
 
         // Start server
         app.listen(PORT, '0.0.0.0', () => {
@@ -468,6 +310,9 @@ const startServer = async () => {
         const gracefulShutdown = async (signal) => {
             console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
 
+            // Stop the connectivity monitor
+            dbManager.stopMonitor();
+
             // Unpublish Bonjour
             bonjour.unpublishAll(() => {
                 console.log('📡 Bonjour service unpublished');
@@ -486,6 +331,7 @@ const startServer = async () => {
 
     } catch (error) {
         console.error('❌ Failed to start server:', error);
+        printDbTroubleshooting();
         process.exit(1);
     }
 };

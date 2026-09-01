@@ -1,5 +1,6 @@
 // models/Timetable.js
 import mongoose from 'mongoose';
+import { syncTombstonePlugin } from '../db/syncPlugin.js';
 
 const TimetableSchema = new mongoose.Schema({
   teacherId: {
@@ -67,5 +68,8 @@ const TimetableSchema = new mongoose.Schema({
 TimetableSchema.index({ teacherId: 1, day: 1, startTime: 1 }, { unique: true });
 TimetableSchema.index({ classId: 1, day: 1 });
 TimetableSchema.index({ academicYear: 1 });
+
+// Record deletions for the offline/online sync
+TimetableSchema.plugin(syncTombstonePlugin);
 
 export default mongoose.model('Timetable', TimetableSchema);

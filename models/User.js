@@ -1,4 +1,5 @@
 import mongoose from "mongoose"
+import { syncTombstonePlugin } from "../db/syncPlugin.js";
 
 const userschema = new mongoose.Schema({
     name: {
@@ -37,6 +38,9 @@ const userschema = new mongoose.Schema({
     }
 
 }, { timestamps: true });
+
+// Record deletions for the offline/online sync
+userschema.plugin(syncTombstonePlugin);
 
 const User = mongoose.model("User", userschema);
 

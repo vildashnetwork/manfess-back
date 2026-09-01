@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { syncTombstonePlugin } from '../db/syncPlugin.js';
 
 const TeacherAttendanceSchema = new mongoose.Schema({
   teacherId: {
@@ -80,6 +81,9 @@ TeacherAttendanceSchema.index(
 // Index for faster queries
 TeacherAttendanceSchema.index({ teacherId: 1, date: -1 });
 TeacherAttendanceSchema.index({ status: 1 });
+
+// Record deletions for the offline/online sync
+TeacherAttendanceSchema.plugin(syncTombstonePlugin);
 
 const TeacherAttendance = mongoose.model('TeacherAttendance', TeacherAttendanceSchema);
 

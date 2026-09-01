@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { syncTombstonePlugin } from "../db/syncPlugin.js";
 
 const schoolClassSchema = new mongoose.Schema({
     className: {
@@ -150,6 +151,9 @@ schoolClassSchema.methods.isFull = function () {
 schoolClassSchema.methods.getAvailableSlots = function () {
     return Math.max(0, this.maxStudents - this.studentCount);
 };
+
+// Record deletions for the offline/online sync
+schoolClassSchema.plugin(syncTombstonePlugin);
 
 const SchoolClass = mongoose.model("SchoolClass", schoolClassSchema);
 
