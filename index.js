@@ -17,6 +17,7 @@ import subject from "./routes/subject.js";
 import timetableRoutes from './routes/timetable.js';
 import teacherAttendanceRoutes from './routes/teacherAttendance.js';
 import teacherSalaryRoutes from './routes/teacherSalary.js';
+import schoolSettings from "./routes/schoolSettings.js";
 
 // ==================== INITIALIZATION ====================
 const app = express();
@@ -201,6 +202,7 @@ app.use("/api", schoolclass);
 app.use("/api", student);
 app.use("/api", user);
 app.use("/api", subject);
+app.use("/api", schoolSettings);
 
 app.use("/api", timetableRoutes);
 app.use("/api", teacherAttendanceRoutes);
