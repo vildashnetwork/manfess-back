@@ -10,7 +10,7 @@ const schoolClassSchema = new mongoose.Schema({
     },
     department: {
         type: String,
-        enum: ["Science", "Arts", "Commercial"],
+        enum: ["General", "Science", "Arts", "Commercial"],
         required: [true, "Department is required"],
         trim: true
     },
