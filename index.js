@@ -292,18 +292,34 @@ const startServer = async () => {
             console.log(`📍 Network: http://${ip}:${PORT}`);
             console.log('=================================');
 
-            // Advertise via mDNS
-            try {
-                bonjour.publish({
-                    name: SERVICE_NAME,
-                    type: 'http',
-                    port: PORT,
-                    host: HOSTNAME
-                });
-                console.log(`📡 mDNS active – http://${HOSTNAME}.local:${PORT}`);
-            } catch (error) {
-                console.warn('⚠️ mDNS advertisement failed:', error.message);
-            }
+            // Advertise via mDNS (never crash the server over mDNS)
+            const advertise = (name) => {
+                try {
+                    const service = bonjour.publish({
+                        name,
+                        type: 'http',
+                        port: PORT,
+                        host: HOSTNAME
+                    });
+                    // The name-conflict error is emitted ASYNC on the service,
+                    // so it must be handled here (a try/catch cannot catch it).
+                    service.on('error', (error) => {
+                        console.warn('⚠️ mDNS advertisement failed:', error.message);
+                        // Another instance/device already uses this name ->
+                        // retry once with a unique name instead of crashing.
+                        if (/already in use/i.test(error.message || '') && name === SERVICE_NAME) {
+                            try { service.stop(() => {}); } catch { /* ignore */ }
+                            const uniqueName = `${SERVICE_NAME} (${process.pid})`;
+                            console.log(`📡 Retrying mDNS advertisement as "${uniqueName}"...`);
+                            advertise(uniqueName);
+                        }
+                    });
+                    console.log(`📡 mDNS active – ${name} on http://${HOSTNAME}.local:${PORT}`);
+                } catch (error) {
+                    console.warn('⚠️ mDNS advertisement failed:', error.message);
+                }
+            };
+            advertise(SERVICE_NAME);
 
             console.log('=================================\n');
         });
