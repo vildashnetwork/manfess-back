@@ -705,7 +705,7 @@ router.post('/timetable/generate', async (req, res) => {
       });
     });
 
-    // 5. Assign teachers to slots (greedy, conflict-free)
+    // 5. Assign teachers to slots (conflict-free, spread across the week)
     const generatedEntries = [];
     const teacherSlotUsage = new Set(); // "teacherId|day|periodNumber"
     const classSlotUsage = new Set();   // "classId|day|periodNumber"
@@ -718,66 +718,104 @@ router.post('/timetable/generate', async (req, res) => {
       return b.periods - a.periods;
     });
 
-    const conflicts = [];
+    // Slots grouped by day so placement rotates across the week instead of
+    // filling Monday first and starving the last days.
+    const slotsByDay = new Map();
+    allSlots.forEach((slot) => {
+      if (!slotsByDay.has(slot.day)) slotsByDay.set(slot.day, []);
+      slotsByDay.get(slot.day).push(slot);
+    });
+    const dayNames = [...slotsByDay.keys()];
 
-    for (const assignment of sortableAssignments) {
-      let remainingPeriods = assignment.periods;
-      let slotIndex = 0;
+    // Try to book one slot for an assignment. Returns true when placed.
+    const tryPlace = (assignment, slot) => {
+      const availableTeacher = assignment.teacherObjects.find((t) => {
+        if (!isTeacherAvailable(t, slot.day)) return false;
+        return !teacherSlotUsage.has(`${t.id}|${slot.day}|${slot.periodNumber}`);
+      });
+      if (!availableTeacher) return false;
 
-      while (remainingPeriods > 0 && slotIndex < allSlots.length) {
-        const slot = allSlots[slotIndex];
+      const classKey = `${assignment.classId}|${slot.day}|${slot.periodNumber}`;
+      const classBusy = classSlotUsage.has(classKey);
+      const subjectAlreadyToday = generatedEntries.some(
+        (e) =>
+          e.classId === assignment.classId &&
+          e.day === slot.day &&
+          e.subjectId === assignment.subjectId
+      );
 
-        // Find a teacher for this assignment available at this slot.
-        const availableTeacher = assignment.teacherObjects.find((t) => {
-          if (!isTeacherAvailable(t, slot.day)) return false;
-          const teacherKey = `${t.id}|${slot.day}|${slot.periodNumber}`;
-          return !teacherSlotUsage.has(teacherKey);
-        });
+      // A class may host different subjects at the same slot (parallel
+      // multi-subject with different teachers), but the same subject never
+      // repeats at the same slot for the same class.
+      if (classBusy && subjectAlreadyToday) return false;
 
-        if (!availableTeacher) {
-          slotIndex += 1;
-          continue;
+      const ratePerPeriod = assignment.cycle === 'first' ? 500 : 700;
+
+      generatedEntries.push({
+        teacherId: availableTeacher.id,
+        classId: assignment.classId,
+        subjectId: assignment.subjectId,
+        day: slot.day,
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        periodNumber: slot.periodNumber,
+        cycle: assignment.cycle,
+        ratePerPeriod,
+        room: '',
+        academicYear,
+        isActive: true,
+      });
+
+      teacherSlotUsage.add(`${availableTeacher.id}|${slot.day}|${slot.periodNumber}`);
+      classSlotUsage.add(classKey);
+      return true;
+    };
+
+    // One placement pass. When allowSameDayRepeat is false a subject gets at
+    // most one period per day per class (spreads the week); when true, double
+    // periods on the same day are allowed as a last resort.
+    const runPlacementPass = (assignmentsToPlace, allowSameDayRepeat) => {
+      for (const assignment of assignmentsToPlace) {
+        let remaining = assignment.periods - (assignment.placedPeriods || 0);
+        let guard = 0;
+        while (remaining > 0 && guard < 40) {
+          let placedThisRound = 0;
+          for (const day of dayNames) {
+            if (remaining <= 0) break;
+            const daySlots = slotsByDay.get(day) || [];
+            for (const slot of daySlots) {
+              if (remaining <= 0) break;
+              const subjectAlreadyToday = generatedEntries.some(
+                (e) =>
+                  e.classId === assignment.classId &&
+                  e.day === slot.day &&
+                  e.subjectId === assignment.subjectId
+              );
+              if (subjectAlreadyToday && !allowSameDayRepeat) continue;
+              if (tryPlace(assignment, slot)) {
+                remaining -= 1;
+                placedThisRound += 1;
+              }
+            }
+          }
+          if (placedThisRound === 0) break; // stuck: no bookable slot this round
+          guard += 1;
         }
-
-        const classKey = `${assignment.classId}|${slot.day}|${slot.periodNumber}`;
-        const subjectAlreadyToday = generatedEntries.some(
-          (e) =>
-            e.classId === assignment.classId &&
-            e.day === slot.day &&
-            e.subjectId === assignment.subjectId
-        );
-
-        // A class may host different subjects at the same slot (different teachers)
-        // but the same subject should not repeat on the same day for the same class.
-        if (classSlotUsage.has(classKey) && subjectAlreadyToday) {
-          slotIndex += 1;
-          continue;
-        }
-
-        const ratePerPeriod = assignment.cycle === 'first' ? 500 : 700;
-
-        generatedEntries.push({
-          teacherId: assignment.teacherIds[0],
-          classId: assignment.classId,
-          subjectId: assignment.subjectId,
-          day: slot.day,
-          startTime: slot.startTime,
-          endTime: slot.endTime,
-          periodNumber: slot.periodNumber,
-          cycle: assignment.cycle,
-          ratePerPeriod,
-          room: '',
-          academicYear,
-          isActive: true,
-        });
-
-        teacherSlotUsage.add(`${availableTeacher.id}|${slot.day}|${slot.periodNumber}`);
-        classSlotUsage.add(classKey);
-        remainingPeriods -= 1;
-        slotIndex += 1;
+        assignment.placedPeriods = assignment.periods - remaining;
       }
+    };
 
-      if (remainingPeriods > 0) {
+    // Pass 1 (strict): spread every subject across the week, one period/day.
+    runPlacementPass(sortableAssignments, false);
+    // Pass 2 (relaxed): fill anything left by allowing double periods on a day.
+    runPlacementPass(
+      sortableAssignments.filter((a) => (a.placedPeriods || 0) < a.periods),
+      true
+    );
+
+    const conflicts = [];
+    for (const assignment of sortableAssignments) {
+      if ((assignment.placedPeriods || 0) < assignment.periods) {
         const teacherName = assignment.teacherObjects[0]?.name || 'Unknown';
         conflicts.push({
           classId: assignment.classId,
@@ -787,8 +825,8 @@ router.post('/timetable/generate', async (req, res) => {
           teacherId: assignment.teacherIds[0],
           teacherName,
           requestedPeriods: assignment.periods,
-          placedPeriods: assignment.periods - remainingPeriods,
-          reason: 'Not enough available teacher slots on the configured school days',
+          placedPeriods: assignment.placedPeriods || 0,
+          reason: 'Not enough free slots with an available teacher on the configured school days',
         });
       }
     }
