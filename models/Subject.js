@@ -31,6 +31,11 @@ const SubjectSchema = new mongoose.Schema({
         min: [1, "Periods per week must be at least 1"],
         max: [20, "Periods per week cannot exceed 20"],
         default: 4
+    },
+    periodsByClass: {
+        type: Map,
+        of: Number,
+        default: {}
     }
 }, { timestamps: true })
 

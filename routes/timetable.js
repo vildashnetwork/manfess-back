@@ -588,6 +588,20 @@ const isTeacherAvailable = (teacher, day) => {
   return days.includes(day);
 };
 
+// Resolve the number of weekly periods for a (subject, class) pair.
+// A per-class override (periodsByClass[classId]) always wins; otherwise the
+// subject-wide periodsPerWeek applies; otherwise 4. Works whether the path
+// is a Mongoose Map (hydrated doc) or a plain object (lean/serialized).
+const resolvePeriodsForClass = (subj, classId) => {
+  const raw = subj.periodsByClass;
+  const override = raw instanceof Map ? raw.get(String(classId)) : raw?.[String(classId)];
+  const n = Number(override);
+  if (Number.isFinite(n) && n >= 1) return Math.min(20, Math.floor(n));
+  const fallback = Number(subj.periodsPerWeek);
+  if (Number.isFinite(fallback) && fallback >= 1) return Math.min(20, Math.floor(fallback));
+  return 4;
+};
+
 /**
  * POST /timetable/generate
  */
@@ -675,7 +689,7 @@ router.post('/timetable/generate', async (req, res) => {
           assignments.push({
             classId, className: displayName, subjectId: String(subj._id),
             subjectName: subj.name, subjectCode: subj.code, cycle,
-            teacherIds: [], teacherObjects: [], periods: subj.periodsPerWeek || 4,
+            teacherIds: [], teacherObjects: [], periods: resolvePeriodsForClass(subj, classId),
             conflict: `No teacher assigned for ${subj.name} in this class`,
           });
           return;
@@ -686,7 +700,7 @@ router.post('/timetable/generate', async (req, res) => {
           subjectName: subj.name, subjectCode: subj.code, cycle,
           teacherIds: eligibleTeachers.map((t) => t.id),
           teacherObjects: eligibleTeachers,
-          periods: subj.periodsPerWeek || 4,
+          periods: resolvePeriodsForClass(subj, classId),
         });
       });
     });
