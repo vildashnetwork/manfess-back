@@ -539,14 +539,11 @@ const minutesToTimeString = (mins) => {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 };
 
-// Build the list of teachable period slots for a school day, excluding
-// the break window. Each slot is { day, periodNumber, startTime, endTime }.
+// Build continuous teaching periods for a school day.
 const buildPeriodSlots = (day, settings) => {
   const slots = [];
   const startMin = timeStringToMinutes(settings.schoolStartTime);
   const endMin = timeStringToMinutes(settings.schoolEndTime);
-  const breakStart = timeStringToMinutes(settings.breakStart);
-  const breakEnd = timeStringToMinutes(settings.breakEnd);
   const duration = settings.periodDurationMinutes || 45;
 
   let cursor = startMin;
@@ -556,19 +553,13 @@ const buildPeriodSlots = (day, settings) => {
     const slotStart = cursor;
     const slotEnd = cursor + duration;
 
-    // Skip slots that overlap with the mid-day break.
-    const overlapsBreak = slotStart < breakEnd && slotEnd > breakStart;
-
-    if (!overlapsBreak) {
-      slots.push({
-        day,
-        periodNumber,
-        startTime: minutesToTimeString(slotStart),
-        endTime: minutesToTimeString(slotEnd),
-      });
-      periodNumber += 1;
-    }
-
+    slots.push({
+      day,
+      periodNumber,
+      startTime: minutesToTimeString(slotStart),
+      endTime: minutesToTimeString(slotEnd),
+    });
+    periodNumber += 1;
     cursor = slotEnd;
   }
 
@@ -619,20 +610,27 @@ router.post('/timetable/generate', async (req, res) => {
       });
     }
 
-    const schoolDays = (req.body.schoolDays && req.body.schoolDays.length)
+    const configuredDays = (req.body.schoolDays && req.body.schoolDays.length)
       ? req.body.schoolDays
       : (settings.schoolDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']);
+    const dayOrder = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5 };
+    const schoolDays = [...new Set(configuredDays)]
+      .filter((day) => dayOrder[day])
+      .sort((a, b) => dayOrder[a] - dayOrder[b]);
 
     // 2. Build the master list of period slots across all school days
     const allSlots = [];
     schoolDays.forEach((day) => allSlots.push(...buildPeriodSlots(day, settings)));
-    const dayOrder = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
-    allSlots.sort((a, b) => (dayOrder[a.day] || 7) - (dayOrder[b.day] || 7) || a.periodNumber - b.periodNumber);
+    allSlots.sort((a, b) => dayOrder[a.day] - dayOrder[b.day] || a.periodNumber - b.periodNumber);
 
     // 3. Fetch active classes, teachers and subjects
     const [classes, teachers, subjects] = await Promise.all([
       SchoolClass.find({ isActive: true }).sort({ className: 1, department: 1, section: 1 }),
-      User.find({ role: 'teacher', isActive: true }),
+      // Keep legacy teacher records (created before isActive was added) active.
+      User.find({
+        role: 'teacher',
+        $or: [{ isActive: true }, { isActive: { $exists: false } }],
+      }),
       Subject.find({}),
     ]);
 
@@ -744,10 +742,8 @@ router.post('/timetable/generate', async (req, res) => {
           e.subjectId === assignment.subjectId
       );
 
-      // A class may host different subjects at the same slot (parallel
-      // multi-subject with different teachers), but the same subject never
-      // repeats at the same slot for the same class.
-      if (classBusy && subjectAlreadyToday) return false;
+      // A class has one lesson at a time. Different subjects must never clash.
+      if (classBusy) return false;
 
       const ratePerPeriod = assignment.cycle === 'first' ? 500 : 700;
 

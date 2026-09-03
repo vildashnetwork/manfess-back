@@ -20,6 +20,10 @@ const userschema = new mongoose.Schema({
         type: String,
         enum: ["teacher", "admin", "bursar"]
     },
+    isActive: {
+        type: Boolean,
+        default: true
+    },
     qualification: {
         type: String,
         default: ""
@@ -29,6 +33,14 @@ const userschema = new mongoose.Schema({
         default: []
     },
     classIds: {
+        type: [String],
+        default: []
+    },
+    isPermanent: {
+        type: Boolean,
+        default: false
+    },
+    availableDays: {
         type: [String],
         default: []
     },
