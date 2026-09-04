@@ -682,7 +682,10 @@ router.post('/timetable/generate', async (req, res) => {
         const checkTeacher = (t) => {
           const teachesSubject = t.subjectIds.includes(String(subj._id));
           const teachesClass = t.classIds.includes(classId);
-          if (teachesSubject && (teachesClass || repairMode)) {
+          const explicitlyAssigned = (subj.teacherIds || []).some(
+            (teacherId) => String(teacherId) === String(t._id)
+          );
+          if ((teachesSubject || explicitlyAssigned) && (teachesClass || repairMode)) {
             if (!eligibleTeachers.includes(t)) eligibleTeachers.push(t);
           }
         };
