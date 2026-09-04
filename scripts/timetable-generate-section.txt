@@ -85,3 +85,68 @@ router.post('/timetable/generate', async (req, res) => {
         });
       }
     }
+// 3. Run the scheduler
+    const result = generateTimetableSchedule({
+      classes,
+      teachers,
+      subjects,
+      settings,
+      schoolDays,
+      repairMode,
+      academicYear,
+    });
+    const { entries: generatedEntries, conflicts, stats } = result;
+
+    // 4. Clear existing entries for the academic year and persist new ones
+    await Timetable.deleteMany({ academicYear });
+
+    let savedEntries = [];
+    if (generatedEntries.length > 0) {
+      savedEntries = await Timetable.insertMany(generatedEntries, { ordered: false });
+    }
+
+    // One batched query instead of one findById + populate per entry (the old
+    // N+1 pattern made generation take 20+ seconds on slow networks).
+    const populatedDocs = await Timetable.find({
+      _id: { $in: savedEntries.map((entry) => entry._id) },
+    })
+      .populate('teacherId', 'name email')
+      .populate('classId', 'className department')
+      .populate('subjectId', 'name code');
+
+    // Restore the insertion order of savedEntries (find() does not guarantee
+    // order), so the API response stays stable for the UI.
+    const populatedById = new Map(populatedDocs.map((doc) => [String(doc._id), doc]));
+    const populatedEntries = savedEntries
+      .map((entry) => populatedById.get(String(entry._id)))
+      .filter(Boolean);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        academicYear,
+        totalPeriods: stats.totalSlots,
+        generated: populatedEntries.length,
+        conflicts,
+        suggestions: conflicts.length > 0
+          ? [
+              'Fix All Conflicts regenerates the week and fills every slot a qualified teacher can cover.',
+              'If a conflict still remains, add more active teachers or assign the missing subject/class mappings.',
+              'Reduce weekly periods or increase periods per day when total demand exceeds available slots.',
+            ]
+          : [],
+        entries: populatedEntries,
+      },
+      message: `Timetable generated: ${populatedEntries.length} periods scheduled${conflicts.length ? `, ${conflicts.length} conflict(s) found` : ''}.`,
+    });
+  } catch (error) {
+    console.error('❌ Error generating timetable:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error generating timetable',
+      error: error.message,
+    });
+  } finally {
+    generationInProgress = false;
+  }
+});

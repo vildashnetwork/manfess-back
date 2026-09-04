@@ -224,6 +224,10 @@ export function generateTimetableSchedule(input) {
         teacherObjects: eligible,
         eligibleCount: eligible.length,
         periods: resolvePeriodsForClass(subj, classId),
+        // effectivePeriods starts equal to the requested periods; the
+        // auto-reduce pass may lower it when the requested amount genuinely
+        // cannot be scheduled with the available qualified teachers/slots.
+        effectivePeriods: resolvePeriodsForClass(subj, classId),
         placedPeriods: 0,
         syncPlaced: 0,
         hasConsecutivePair: false,
@@ -319,6 +323,11 @@ export function generateTimetableSchedule(input) {
       a.entries = [];
     });
 
+    // Follow any auto-reduced effectivePeriods from previous rounds.
+    commonGroups.forEach((group) => {
+      group.target = Math.min(...group.members.map((a) => a.effectivePeriods));
+    });
+
     const slotKey = (ownerId, slot) => `${ownerId}|${slot.day}|${slot.periodNumber}`;
     const classFree = (classId, slot) => !classBusy.has(slotKey(classId, slot));
     const teacherFree = (t, slot) =>
@@ -341,7 +350,7 @@ export function generateTimetableSchedule(input) {
     const place = (assignment, slot, teacher) => {
       if (!classFree(assignment.classId, slot)) return false;
       if (!teacherFree(teacher, slot)) return false;
-      if (assignment.placedPeriods >= assignment.periods) return false; // never over-place
+      if (assignment.placedPeriods >= assignment.effectivePeriods) return false; // never over-place
 
       notePair(assignment, slot);
       const entry = {
@@ -446,18 +455,18 @@ export function generateTimetableSchedule(input) {
 
     const placeAssignmentGreedy = (assignment, allowSameDay) => {
       let guard = 0;
-      while (assignment.placedPeriods < assignment.periods && guard < 60) {
+      while (assignment.placedPeriods < assignment.effectivePeriods && guard < 60) {
         guard += 1;
         let placedThisRound = 0;
         const days = daysForAssignment(assignment);
         // Rotate the starting day so restarts explore different layouts.
         const offset = Math.floor(rng() * Math.max(1, days.length));
         for (let di = 0; di < days.length; di += 1) {
-          if (assignment.placedPeriods >= assignment.periods) break;
+          if (assignment.placedPeriods >= assignment.effectivePeriods) break;
           const day = days[(di + offset) % days.length];
           if (!allowSameDay && assignment.entries.some((e) => e.slot.day === day)) continue;
           for (const slot of candidateSlots(assignment, day)) {
-            if (assignment.placedPeriods >= assignment.periods) break;
+            if (assignment.placedPeriods >= assignment.effectivePeriods) break;
             const teacher = pickTeacher(assignment, slot);
             if (teacher && place(assignment, slot, teacher)) {
               placedThisRound += 1;
@@ -469,30 +478,28 @@ export function generateTimetableSchedule(input) {
     };
 
 
-    // Bipartite matching: every class in the group gets a DISTINCT free
-    // teacher for the slot (so the whole group is taught simultaneously).
-    const matchGroupTeachers = (members, slot) => {
+    // Best-effort group matching: fit as many DISTINCT teachers as possible to
+    // this slot (each class always gets its own qualified teacher). The match
+    // may cover only a subset of the group when the staff cannot cover the
+    // full group in parallel — lessons are never dropped because of it.
+    const matchPartial = (members, slot) => {
       const candidates = members
         .map((assignment) => ({
           assignment,
-          teachers: freeTeachersFor(assignment, slot),
+          teachers: freeTeachersFor(assignment, slot).sort(
+            (a, b) => (teacherLoad.get(a.id) || 0) - (teacherLoad.get(b.id) || 0)
+          ),
         }))
         .sort((a, b) => a.teachers.length - b.teachers.length);
       const selected = new Map();
-
-      const choose = (index) => {
-        if (index >= candidates.length) return true;
-        const candidate = candidates[index];
+      candidates.forEach((candidate) => {
         for (const teacher of candidate.teachers) {
           if (selected.has(teacher.id)) continue;
           selected.set(teacher.id, candidate.assignment);
-          if (choose(index + 1)) return true;
-          selected.delete(teacher.id);
+          break;
         }
-        return false;
-      };
-
-      return choose(0) ? selected : null;
+      });
+      return selected;
     };
 
     const slotOrderRotated = () => {
@@ -515,16 +522,19 @@ export function generateTimetableSchedule(input) {
         if (synced >= target) break;
         for (const slot of slotOrder) {
           if (synced >= target) break;
-          if (members.some((a) => a.placedPeriods >= a.periods)) break;
+          const candidates = members.filter((a) => a.placedPeriods < a.effectivePeriods);
+          if (candidates.length === 0) break;
           if (
             !allowSameDay &&
-            members.some((a) => a.entries.some((e) => e.slot.day === slot.day))
+            candidates.some((a) => a.entries.some((e) => e.slot.day === slot.day))
           ) {
             continue;
           }
-          if (members.some((a) => !classFree(a.classId, slot))) continue;
-          const matched = matchGroupTeachers(members, slot);
-          if (!matched) continue;
+          if (candidates.some((a) => !classFree(a.classId, slot))) continue;
+          const matched = matchPartial(candidates, slot);
+          // A slot only counts as a "synchronized lesson" when at least two
+          // departments run the subject at the same time.
+          if (matched.size < 2) continue;
           const placedRecords = [];
           let allPlaced = true;
           for (const [teacherId, assignment] of matched) {
@@ -537,9 +547,9 @@ export function generateTimetableSchedule(input) {
           }
           if (allPlaced) {
             synced += 1;
-            members.forEach((a) => {
-              a.syncPlaced += 1;
-            });
+            for (const assignment of matched.values()) {
+              assignment.syncPlaced += 1;
+            }
           } else {
             // Roll back the partial placement so the group stays atomic.
             placedRecords.forEach((record) => unplace(record));
@@ -561,8 +571,8 @@ export function generateTimetableSchedule(input) {
 
     // ----- Phase B: greedy placement, most constrained first -----
     const phaseBOrder = [...schedulable].sort((a, b) => {
-      const aKey = a.eligibleCount * 1000 + (a.periods - a.placedPeriods) + rng() * 50;
-      const bKey = b.eligibleCount * 1000 + (b.periods - b.placedPeriods) + rng() * 50;
+      const aKey = a.eligibleCount * 1000 + (a.effectivePeriods - a.placedPeriods) + rng() * 50;
+      const bKey = b.eligibleCount * 1000 + (b.effectivePeriods - b.placedPeriods) + rng() * 50;
       return aKey - bKey;
     });
     phaseBOrder.forEach((a) => placeAssignmentGreedy(a, false));
@@ -588,12 +598,15 @@ export function generateTimetableSchedule(input) {
 
     const repairStuck = () => {
       const stuck = [...schedulable]
-        .filter((a) => a.placedPeriods < a.periods)
-        .sort((a, b) => a.eligibleCount - b.eligibleCount || b.periods - a.periods);
+        .filter((a) => a.placedPeriods < a.effectivePeriods)
+        .sort((a, b) => a.eligibleCount - b.eligibleCount || b.effectivePeriods - a.effectivePeriods);
 
       stuck.forEach((assignment) => {
         let guard = 0;
-        while (assignment.placedPeriods < assignment.periods && guard < assignment.periods + 4) {
+        while (
+          assignment.placedPeriods < assignment.effectivePeriods &&
+          guard < assignment.effectivePeriods + 4
+        ) {
           guard += 1;
           const direct = findDirectPlacement(assignment);
           if (direct) {
@@ -645,7 +658,7 @@ export function generateTimetableSchedule(input) {
     repairStuck();
 
     const missing = schedulable.reduce(
-      (sum, a) => sum + Math.max(0, a.periods - a.placedPeriods),
+      (sum, a) => sum + Math.max(0, a.effectivePeriods - a.placedPeriods),
       0
     );
     const pairs = schedulable.filter((a) => a.hasConsecutivePair).length;

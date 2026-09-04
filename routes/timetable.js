@@ -7,6 +7,7 @@ import User from '../models/User.js';
 import SchoolClass from '../models/SchoolClass.js';
 import Subject from '../models/Subject.js';
 import SchoolSettings from '../models/SchoolSettings.js';
+import { generateTimetableSchedule } from '../services/timetableScheduler.js';
 
 // ============================================
 // GET Routes
@@ -521,80 +522,22 @@ router.delete('/timetable/bulk', async (req, res) => {
     });
   }
 });
-
-// ============================================
+// ========================================
 // Timetable Generation
-// ============================================
-
-// Convert a "HH:mm" string to minutes since midnight.
-const timeStringToMinutes = (t) => {
-  const [h, m] = t.split(':').map(Number);
-  return h * 60 + m;
-};
-
-// Convert minutes since midnight back to a "HH:mm" string.
-const minutesToTimeString = (mins) => {
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-};
-
-// Build continuous teaching periods for a school day.
-const buildPeriodSlots = (day, settings) => {
-  const slots = [];
-  const startMin = timeStringToMinutes(settings.schoolStartTime);
-  const endMin = timeStringToMinutes(settings.schoolEndTime);
-  const duration = settings.periodDurationMinutes || 45;
-
-  let cursor = startMin;
-  let periodNumber = 1;
-
-  while (cursor + duration <= endMin && periodNumber <= (settings.periodsPerDay || 20)) {
-    const slotStart = cursor;
-    const slotEnd = cursor + duration;
-
-    slots.push({
-      day,
-      periodNumber,
-      startTime: minutesToTimeString(slotStart),
-      endTime: minutesToTimeString(slotEnd),
-    });
-    periodNumber += 1;
-    cursor = slotEnd;
-  }
-
-  return slots;
-};
-
-// Check whether a teacher is available on a given day.
-// Teachers with no availability config at all (isPermanent false AND an empty
-// availableDays list — the User model default for every never-edited teacher)
-// are treated as available all days. Previously they failed every slot and were
-// silently dropped from generation: all their periods surfaced as conflicts.
-const isTeacherAvailable = (teacher, day) => {
-  if (!teacher) return false;
-  if (teacher.isPermanent) return true;
-  if (!teacher.availabilityConfigured) return true; // never configured → available all days
-  const days = teacher.availableDays || [];
-  return days.includes(day);
-};
-
-// Resolve the number of weekly periods for a (subject, class) pair.
-// A per-class override (periodsByClass[classId]) always wins; otherwise the
-// subject-wide periodsPerWeek applies; otherwise 4. Works whether the path
-// is a Mongoose Map (hydrated doc) or a plain object (lean/serialized).
-const resolvePeriodsForClass = (subj, classId) => {
-  const raw = subj.periodsByClass;
-  const override = raw instanceof Map ? raw.get(String(classId)) : raw?.[String(classId)];
-  const n = Number(override);
-  if (Number.isFinite(n) && n >= 1) return Math.min(20, Math.floor(n));
-  const fallback = Number(subj.periodsPerWeek);
-  if (Number.isFinite(fallback) && fallback >= 1) return Math.min(20, Math.floor(fallback));
-  return 4;
-};
+// ========================================
 
 /**
- * POST /timetable/generate
+ * POST /timetable/generate — schedules the whole week atomically.
+ *
+ * The scheduling logic lives in services/timetableScheduler.js:
+ *   - never assigns a teacher to a subject they don't teach
+ *   - synchronized common-subject lessons (a subject taken by EVERY
+ *     department of a level runs at the same time in all those classes)
+ *   - most-constrained-first greedy placement + ejection-chain repair
+ *   - randomized restarts until zero missing periods
+ *
+ * This route loads the domain data, runs the scheduler and replaces the
+ * previous timetable for the academic year.
  */
 // Only one generation may run at a time. Two concurrent generates (e.g. the
 // dashboard button and an open wizard) would interleave deleteMany +
@@ -627,17 +570,12 @@ router.post('/timetable/generate', async (req, res) => {
     const configuredDays = (req.body.schoolDays && req.body.schoolDays.length)
       ? req.body.schoolDays
       : (settings.schoolDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']);
-    const dayOrder = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5 };
+    const dayOrder = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
     const schoolDays = [...new Set(configuredDays)]
       .filter((day) => dayOrder[day])
       .sort((a, b) => dayOrder[a] - dayOrder[b]);
 
-    // 2. Build the master list of period slots across all school days
-    const allSlots = [];
-    schoolDays.forEach((day) => allSlots.push(...buildPeriodSlots(day, settings)));
-    allSlots.sort((a, b) => dayOrder[a.day] - dayOrder[b.day] || a.periodNumber - b.periodNumber);
-
-    // 3. Fetch active classes, teachers and subjects
+    // 2. Fetch active classes, teachers and subjects
     const [classes, teachers, subjects] = await Promise.all([
       SchoolClass.find({ isActive: true }).sort({ className: 1, department: 1, section: 1 }),
       // Keep legacy teacher records (created before isActive was added) active.
@@ -648,483 +586,42 @@ router.post('/timetable/generate', async (req, res) => {
       Subject.find({}),
     ]);
 
-    const teacherMap = new Map();
-    teachers.forEach((t) => {
-      const idStr = String(t._id);
-      teacherMap.set(idStr, {
-        id: idStr,
-        name: t.name,
-        subjectIds: (t.subjectIds || []).map(String),
-        classIds: (t.classIds || []).map(String),
-        isPermanent: !!t.isPermanent,
-        availableDays: t.availableDays || [],
-        // True only when the teacher has an explicit availability config saved.
-        // Unconfigured teachers fall back to "available all days" in
-        // isTeacherAvailable so they are never silently excluded.
-        availabilityConfigured:
-          !!t.isPermanent || (Array.isArray(t.availableDays) && t.availableDays.length > 0),
-      });
-    });
-
+    // Repair mode also extends part-time teachers' availability to the full
+    // configured week so they are never silently excluded from covering gaps.
     if (repairMode && schoolDays.length > 0) {
-      const expandedTeachers = [...teacherMap.values()].filter(
-        (teacher) => teacher.availabilityConfigured &&
-          schoolDays.some((day) => !teacher.availableDays.includes(day))
+      const teachersToExpand = teachers.filter(
+        (teacher) =>
+          (!!teacher.isPermanent ||
+            (Array.isArray(teacher.availableDays) && teacher.availableDays.length > 0)) &&
+          schoolDays.some((day) => !(teacher.availableDays || []).includes(day))
       );
-      if (expandedTeachers.length > 0) {
+      if (teachersToExpand.length > 0) {
         await User.bulkWrite(
-          expandedTeachers.map((teacher) => ({
+          teachersToExpand.map((teacher) => ({
             updateOne: {
-              filter: { _id: teacher.id },
+              filter: { _id: teacher._id },
               update: { $set: { availableDays: schoolDays } },
             },
           }))
         );
-        expandedTeachers.forEach((teacher) => {
+        teachersToExpand.forEach((teacher) => {
           teacher.availableDays = [...schoolDays];
         });
       }
     }
-
-    // 4. Build the list of assignments: { classId, subjectId, teacherIds[], periods }
-    const assignments = [];
-
-    classes.forEach((cls) => {
-      const classId = String(cls._id);
-      const cycle = cls.cycle === '1st Cycle' ? 'first' : 'second';
-      const displayName = `${cls.className}${cls.department ? ` ${cls.department}` : ''}${cls.section ? ` ${cls.section}` : ''}`;
-
-      subjects.forEach((subj) => {
-        const subjClassIds = (subj.classIds || []).map(String);
-        if (!subjClassIds.includes(classId)) return;
-
-        const eligibleTeachers = [];
-        const checkTeacher = (t) => {
-          const teachesSubject = t.subjectIds.includes(String(subj._id));
-          const teachesClass = t.classIds.includes(classId);
-          const explicitlyAssigned = (subj.teacherIds || []).some(
-            (teacherId) => String(teacherId) === String(t._id)
-          );
-          if ((teachesSubject || explicitlyAssigned) && (teachesClass || repairMode)) {
-            if (!eligibleTeachers.includes(t)) eligibleTeachers.push(t);
-          }
-        };
-
-        (subj.teacherIds || []).forEach((tid) => {
-          const t = teacherMap.get(String(tid));
-          if (t) checkTeacher(t);
-        });
-
-        if (eligibleTeachers.length === 0) {
-          teachers.forEach((t) => {
-            const tm = teacherMap.get(String(t._id));
-            if (tm) checkTeacher(tm);
-          });
-        }
-
-        // Repair mode can use subject-qualified teachers as substitutes.
-        // NOTE: a teacher is never assigned a subject they do not teach.
-        // (The previous "any active teacher" fallback filled every slot but
-        // put e.g. the Entrepreneurship teacher in front of English and
-        // French classes — mathematically complete, pedagogically wrong.)
-        if (eligibleTeachers.length === 0 && repairMode) {
-          teachers.forEach((t) => {
-            const tm = teacherMap.get(String(t._id));
-            if (tm && tm.subjectIds.includes(String(subj._id))) eligibleTeachers.push(tm);
-          });
-        }
-
-        if (eligibleTeachers.length === 0) {
-          assignments.push({
-            classId, className: displayName, subjectId: String(subj._id),
-            subjectName: subj.name, subjectCode: subj.code, cycle,
-            classLevel: cls.className, department: cls.department, section: cls.section,
-            teacherIds: [], teacherObjects: [], eligibleCount: 0,
-            periods: resolvePeriodsForClass(subj, classId),
-            conflict: `No teacher assigned for ${subj.name} in this class`,
-          });
-          return;
-        }
-
-        // Remember how many *mapped* teachers this assignment really has
-        // BEFORE repair mode appends substitutes, so sorting can prioritize
-        // the most constrained assignments.
-        const eligibleCount = eligibleTeachers.length;
-
-        // Repair mode: append subject-qualified substitutes — teachers who
-        // also teach this subject (per their own subjectIds) even when this
-        // class is not in their classIds. findAvailableTeacher tries
-        // teacherObjects in order, so mapped teachers keep priority and
-        // same-subject colleagues only cover the gaps left by overloaded or
-        // part-time mapped teachers.
-        if (repairMode) {
-          teachers.forEach((t) => {
-            const tm = teacherMap.get(String(t._id));
-            if (
-              tm &&
-              tm.subjectIds.includes(String(subj._id)) &&
-              !eligibleTeachers.includes(tm)
-            ) {
-              eligibleTeachers.push(tm);
-            }
-          });
-        }
-
-        assignments.push({
-          classId, className: displayName, subjectId: String(subj._id),
-          subjectName: subj.name, subjectCode: subj.code, cycle,
-          classLevel: cls.className, department: cls.department, section: cls.section,
-          teacherIds: eligibleTeachers.map((t) => t.id),
-          eligibleCount,
-          teacherObjects: eligibleTeachers,
-          periods: resolvePeriodsForClass(subj, classId),
-        });
-      });
+    // 3. Run the scheduler
+    const result = generateTimetableSchedule({
+      classes,
+      teachers,
+      subjects,
+      settings,
+      schoolDays,
+      repairMode,
+      academicYear,
     });
+    const { entries: generatedEntries, conflicts, stats } = result;
 
-    // 5. Assign teachers to slots (conflict-free, spread across the week)
-    const generatedEntries = [];
-    const teacherSlotUsage = new Set(); // "teacherId|day|periodNumber"
-    const classSlotUsage = new Set();   // "classId|day|periodNumber"
-
-    const sortableAssignments = assignments.filter((a) => a.teacherIds && a.teacherIds.length > 0);
-    sortableAssignments.sort((a, b) => {
-      // Hardest to place first: assignments with the fewest *eligible*
-      // (mapped) teachers. In repair mode every assignment gains substitute
-      // teachers, so teacherIds.length alone no longer discriminates.
-      const aEligible = Number.isFinite(a.eligibleCount) ? a.eligibleCount : a.teacherIds.length;
-      const bEligible = Number.isFinite(b.eligibleCount) ? b.eligibleCount : b.teacherIds.length;
-      if (aEligible !== bEligible) {
-        return aEligible - bEligible;
-      }
-      return b.periods - a.periods;
-    });
-
-    // Slots grouped by day so placement rotates across the week instead of
-    // filling Monday first and starving the last days.
-    const slotsByDay = new Map();
-    allSlots.forEach((slot) => {
-      if (!slotsByDay.has(slot.day)) slotsByDay.set(slot.day, []);
-      slotsByDay.get(slot.day).push(slot);
-    });
-    const dayNames = [...slotsByDay.keys()];
-
-    // Iterate school days from the scarcest-staffed to the most-staffed.
-    // Subjects taught by part-time teachers (e.g. Tue+Thu only) must claim
-    // their few possible days first; subjects with five-day teachers then
-    // spill over onto the well-staffed days instead of stealing the slots
-    // the part-time subjects depend on.
-    const teachersPerDay = new Map(
-      dayNames.map((day) => [
-        day,
-        [...teacherMap.values()].filter((t) => isTeacherAvailable(t, day)).length,
-      ])
-    );
-    const dayNamesScarceFirst = [...dayNames].sort(
-      (a, b) => (teachersPerDay.get(a) || 0) - (teachersPerDay.get(b) || 0)
-    );
-
-    // Days on which THIS assignment's qualified teachers can actually work,
-    // scarcest-staffed first. Subjects with five-day teachers therefore fill
-    // Mon-Wed naturally instead of stealing the thinly-staffed Thu/Fri slots
-    // that part-time subjects (2-day teachers) depend on.
-    const daysForAssignment = (assignment) =>
-      dayNames
-        .filter((day) =>
-          assignment.teacherObjects.some((t) => isTeacherAvailable(t, day)))
-        .sort(
-          (a, b) =>
-            (teachersPerDay.get(a) || 0) - (teachersPerDay.get(b) || 0) ||
-            (dayOrder[a] || 9) - (dayOrder[b] || 9)
-        );
-
-    const findAvailableTeacher = (assignment, slots) => assignment.teacherObjects.find((t) => {
-      return slots.every((slot) => {
-        if (!isTeacherAvailable(t, slot.day)) return false;
-        return !teacherSlotUsage.has(`${t.id}|${slot.day}|${slot.periodNumber}`);
-      });
-    });
-
-    const placeEntry = (assignment, slot, teacher) => {
-      const classKey = `${assignment.classId}|${slot.day}|${slot.periodNumber}`;
-      if (classSlotUsage.has(classKey)) return false;
-
-      const ratePerPeriod = assignment.cycle === 'first' ? 500 : 700;
-
-      generatedEntries.push({
-        teacherId: teacher.id,
-        classId: assignment.classId,
-        subjectId: assignment.subjectId,
-        day: slot.day,
-        startTime: slot.startTime,
-        endTime: slot.endTime,
-        periodNumber: slot.periodNumber,
-        cycle: assignment.cycle,
-        ratePerPeriod,
-        room: '',
-        academicYear,
-        isActive: true,
-      });
-
-      teacherSlotUsage.add(`${teacher.id}|${slot.day}|${slot.periodNumber}`);
-      classSlotUsage.add(classKey);
-      return true;
-    };
-
-    // Try to book one slot for an assignment. Returns true when placed.
-    const tryPlace = (assignment, slot) => {
-      const availableTeacher = findAvailableTeacher(assignment, [slot]);
-      return availableTeacher ? placeEntry(assignment, slot, availableTeacher) : false;
-    };
-
-    // Common subjects for the same level and section are taught concurrently
-    // across departments, but only when every department in the group has the
-    // subject. Each class still receives its own qualified teacher.
-    const commonSubjectGroups = new Map();
-    sortableAssignments.forEach((assignment) => {
-      const key = `${assignment.classLevel}|${assignment.section}|${assignment.subjectId}|${assignment.cycle}`;
-      if (!commonSubjectGroups.has(key)) commonSubjectGroups.set(key, []);
-      commonSubjectGroups.get(key).push(assignment);
-    });
-
-    const findDistinctTeachers = (group, slot) => {
-      const candidates = group
-        .map((assignment) => ({
-          assignment,
-          teachers: assignment.teacherObjects.filter((teacher) =>
-            isTeacherAvailable(teacher, slot.day) &&
-            !teacherSlotUsage.has(`${teacher.id}|${slot.day}|${slot.periodNumber}`)
-          ),
-        }))
-        .sort((a, b) => a.teachers.length - b.teachers.length);
-      const selected = new Map();
-
-      const choose = (index) => {
-        if (index >= candidates.length) return true;
-        const candidate = candidates[index];
-        for (const teacher of candidate.teachers) {
-          if (selected.has(teacher.id)) continue;
-          selected.set(teacher.id, candidate.assignment);
-          if (choose(index + 1)) return true;
-          selected.delete(teacher.id);
-        }
-        return false;
-      };
-
-      return choose(0) ? selected : null;
-    };
-
-    const placeCommonSubjectGroups = () => {
-      for (const group of commonSubjectGroups.values()) {
-        const departments = new Set(group.map((assignment) => assignment.department));
-        if (departments.size < 2 || group.some((assignment) => !assignment.teacherObjects.length)) continue;
-
-        const periodsToSync = Math.min(...group.map((assignment) => assignment.periods));
-        let placed = 0;
-        for (const allowSameDayRepeat of [false, true]) {
-          for (const day of dayNamesScarceFirst) {
-            for (const slot of slotsByDay.get(day) || []) {
-              if (placed >= periodsToSync) continue;
-              if (!allowSameDayRepeat && group.some((assignment) =>
-                generatedEntries.some((entry) =>
-                  entry.classId === assignment.classId && entry.day === day &&
-                  entry.subjectId === assignment.subjectId
-                )
-              )) continue;
-              if (group.some((assignment) => classSlotUsage.has(`${assignment.classId}|${day}|${slot.periodNumber}`))) continue;
-
-              const selected = findDistinctTeachers(group, slot);
-              if (!selected) continue;
-              let placedGroup = true;
-              for (const [teacherId, assignment] of selected) {
-                const teacher = assignment.teacherObjects.find((item) => item.id === teacherId);
-                if (!teacher || !placeEntry(assignment, slot, teacher)) {
-                  placedGroup = false;
-                  break;
-                }
-              }
-              if (placedGroup) {
-                placed += 1;
-                group.forEach((assignment) => {
-                  assignment.placedPeriods = (assignment.placedPeriods || 0) + 1;
-                });
-              }
-            }
-          }
-        }
-      }
-    };
-
-    // Give every multi-period subject at least one consecutive pair where the
-    // class, teacher, and configured school day have capacity.
-    const placeConsecutivePair = (assignment) => {
-      if (assignment.periods < 2) return false;
-      for (const day of daysForAssignment(assignment)) {
-        const daySlots = slotsByDay.get(day) || [];
-        for (let index = 0; index < daySlots.length - 1; index += 1) {
-          const pair = [daySlots[index], daySlots[index + 1]];
-          const teacher = findAvailableTeacher(assignment, pair);
-          const classesAvailable = pair.every(
-            (slot) => !classSlotUsage.has(`${assignment.classId}|${day}|${slot.periodNumber}`)
-          );
-          if (!teacher || !classesAvailable) continue;
-          placeEntry(assignment, pair[0], teacher);
-          placeEntry(assignment, pair[1], teacher);
-          assignment.placedPeriods = 2;
-          assignment.hasConsecutivePair = true;
-          return true;
-        }
-      }
-      assignment.placedPeriods = 0;
-      return false;
-    };
-
-    // Fill periods after the consecutive pair. Strict mode spreads remaining
-    // periods across days; relaxed mode allows additional same-day periods.
-    const runPlacementPass = (assignmentsToPlace, allowSameDayRepeat) => {
-      for (const assignment of assignmentsToPlace) {
-        const assignmentDays = daysForAssignment(assignment);
-        let remaining = assignment.periods - (assignment.placedPeriods || 0);
-        let guard = 0;
-        while (remaining > 0 && guard < 40) {
-          let placedThisRound = 0;
-          for (const day of assignmentDays) {
-            if (remaining <= 0) break;
-            const daySlots = slotsByDay.get(day) || [];
-            for (const slot of daySlots) {
-              if (remaining <= 0) break;
-              const subjectAlreadyToday = generatedEntries.some(
-                (e) =>
-                  e.classId === assignment.classId &&
-                  e.day === slot.day &&
-                  e.subjectId === assignment.subjectId
-              );
-              if (subjectAlreadyToday && !allowSameDayRepeat) continue;
-              if (tryPlace(assignment, slot)) {
-                remaining -= 1;
-                placedThisRound += 1;
-              }
-            }
-          }
-          if (placedThisRound === 0) break; // stuck: no bookable slot this round
-          guard += 1;
-        }
-        assignment.placedPeriods = assignment.periods - remaining;
-      }
-    };
-
-    // Pass 1: synchronize subjects shared across departments.
-    placeCommonSubjectGroups();
-    // Pass 2: reserve a consecutive pair for every remaining subject needing two or more periods.
-    sortableAssignments.forEach(placeConsecutivePair);
-    // Pass 3: spread remaining periods across the week.
-    runPlacementPass(sortableAssignments, false);
-    // Pass 4: fill anything left by allowing additional same-day periods.
-    runPlacementPass(
-      sortableAssignments.filter((a) => (a.placedPeriods || 0) < a.periods),
-      true
-    );
-
-    const periodsPerDayCount = settings.periodsPerDay || 6;
-    const conflicts = [];
-    for (const assignment of sortableAssignments) {
-      const missing = assignment.periods - (assignment.placedPeriods || 0);
-      if (missing <= 0) continue;
-
-      // Diagnosis so the UI can tell the admin EXACTLY what to change.
-      const qualifiedTeachers = [...teacherMap.values()]
-        .filter((t) =>
-          t.subjectIds.includes(assignment.subjectId) ||
-          assignments.some(
-            (candidate) => candidate.subjectId === assignment.subjectId &&
-              candidate.teacherIds.includes(t.id)
-          )
-        )
-        .map((t) => {
-          const days = schoolDays.filter((day) => isTeacherAvailable(t, day));
-          return { name: t.name, days, slots: days.length * periodsPerDayCount };
-        });
-      const subjectWeeklyDemand = assignments
-        .filter((a) => a.subjectId === assignment.subjectId)
-        .reduce((sum, a) => sum + a.periods, 0);
-      const qualifiedTeacherSlots = qualifiedTeachers.reduce((sum, t) => sum + t.slots, 0);
-      const subjectShortfall = Math.max(0, subjectWeeklyDemand - qualifiedTeacherSlots);
-
-      const suggestions = [];
-      if (qualifiedTeachers.length === 0) {
-        suggestions.push(
-          `No teacher is assigned to ${assignment.subjectName} — open Subjects & Periods and assign at least one teacher to it.`
-        );
-      } else {
-        const teacherNames = qualifiedTeachers.map((t) => t.name);
-        if (qualifiedTeachers.length === 1) {
-          suggestions.push(
-            `Only ${teacherNames[0]} teaches ${assignment.subjectName} — add a second ${assignment.subjectName} teacher in Subjects & Periods so lessons can run in parallel.`
-          );
-        }
-        for (const t of qualifiedTeachers) {
-          if (t.days.length < schoolDays.length) {
-            suggestions.push(
-              `${t.name} only works ${t.days.join(", ")} — extend their days in Step 1 (Teacher Availability) for ${(schoolDays.length - t.days.length) * periodsPerDayCount} more weekly slots.`
-            );
-          }
-        }
-        if (subjectShortfall > 0) {
-          suggestions.push(
-            `${assignment.subjectName} needs ${subjectWeeklyDemand} periods/week but its teachers only cover ${qualifiedTeacherSlots} — reduce its weekly periods by ${subjectShortfall} in Subjects & Periods or add teaching capacity.`
-          );
-        } else if (repairMode) {
-          suggestions.push(
-            `Enough qualified capacity exists (${qualifiedTeacherSlots} slots for ${subjectWeeklyDemand} requested) — click Fix All Conflicts again; if this gap persists, free up ${teacherNames.join(" / ")} by slightly reducing another subject they teach.`
-          );
-        }
-      }
-
-      conflicts.push({
-        classId: assignment.classId,
-        className: assignment.className,
-        subjectId: assignment.subjectId,
-        subjectName: assignment.subjectName,
-        teacherId: assignment.teacherIds[0],
-        teacherName: assignment.teacherObjects[0]?.name || "Unknown",
-        requestedPeriods: assignment.periods,
-        placedPeriods: assignment.placedPeriods || 0,
-        missingPeriods: missing,
-        reason: repairMode
-          ? `Not enough qualified ${assignment.subjectName} teacher slots on the configured school days (see the suggested fixes)`
-          : "Not enough free slots with the assigned teacher(s) on the configured school days — run Repair to let other teachers of the same subject cover these periods",
-        suggestions,
-        qualifiedTeacherNames: qualifiedTeachers.map((t) => t.name),
-        qualifiedTeacherSlots,
-        subjectWeeklyDemand,
-        subjectShortfall,
-      });
-    }
-
-    // Record assignments with no eligible teacher at all.
-    assignments
-      .filter((a) => !a.teacherIds || a.teacherIds.length === 0)
-      .forEach((a) => {
-        conflicts.push({
-          classId: a.classId,
-          className: a.className,
-          subjectId: a.subjectId,
-          subjectName: a.subjectName,
-          teacherId: null,
-          teacherName: "No teacher assigned",
-          requestedPeriods: a.periods,
-          placedPeriods: 0,
-          missingPeriods: a.periods,
-          reason: `No teacher is assigned to ${a.subjectName}`,
-          suggestions: [
-            `Open Subjects & Periods and assign a teacher to ${a.subjectName}, then click Fix All Conflicts.`,
-          ],
-          qualifiedTeacherNames: [],
-          subjectShortfall: a.periods,
-        });
-      });
-
-    // 6. Clear existing entries for the academic year and persist new ones
+    // 4. Clear existing entries for the academic year and persist new ones
     await Timetable.deleteMany({ academicYear });
 
     let savedEntries = [];
@@ -1132,21 +629,17 @@ router.post('/timetable/generate', async (req, res) => {
       savedEntries = await Timetable.insertMany(generatedEntries, { ordered: false });
     }
 
-    // NOTE: One batched query instead of one findById + populate per entry.
-    // The previous N+1 pattern issued ~3 DB round-trips per period (500+
-    // queries for a full timetable), making generation take 20+ seconds —
-    // long enough for slow networks or restarting servers to drop the
-    // request, which the UI reported as a generic "Failed to generate
-    // timetable".
+    // One batched query instead of one findById + populate per entry (the old
+    // N+1 pattern made generation take 20+ seconds on slow networks).
     const populatedDocs = await Timetable.find({
       _id: { $in: savedEntries.map((entry) => entry._id) },
     })
-      .populate("teacherId", "name email")
-      .populate("classId", "className department")
-      .populate("subjectId", "name code");
+      .populate('teacherId', 'name email')
+      .populate('classId', 'className department')
+      .populate('subjectId', 'name code');
 
-    // Restore the insertion order of savedEntries (find() does not
-    // guarantee order), so the API response stays stable for the UI.
+    // Restore the insertion order of savedEntries (find() does not guarantee
+    // order), so the API response stays stable for the UI.
     const populatedById = new Map(populatedDocs.map((doc) => [String(doc._id), doc]));
     const populatedEntries = savedEntries
       .map((entry) => populatedById.get(String(entry._id)))
@@ -1156,19 +649,19 @@ router.post('/timetable/generate', async (req, res) => {
       success: true,
       data: {
         academicYear,
-        totalPeriods: allSlots.length,
+        totalPeriods: stats.totalSlots,
         generated: populatedEntries.length,
         conflicts,
         suggestions: conflicts.length > 0
           ? [
-            'Repair mode will assign eligible subjects to other available teachers when possible.',
-            'If conflicts remain, add more active teachers or assign the missing subject/class mappings.',
-            'Reduce weekly periods or increase periods per day when total demand exceeds available slots.',
-          ]
+              'Fix All Conflicts regenerates the week and fills every slot a qualified teacher can cover.',
+              'If a conflict still remains, add more active teachers or assign the missing subject/class mappings.',
+              'Reduce weekly periods or increase periods per day when total demand exceeds available slots.',
+            ]
           : [],
         entries: populatedEntries,
       },
-      message: `Timetable generated: ${populatedEntries.length} periods scheduled${conflicts.length ? `, ${conflicts.length} conflict(s) found` : ""}.`,
+      message: `Timetable generated: ${populatedEntries.length} periods scheduled${conflicts.length ? `, ${conflicts.length} conflict(s) found` : ''}.`,
     });
   } catch (error) {
     console.error('❌ Error generating timetable:', error);
