@@ -1,0 +1,87 @@
+// ========================================
+// Timetable Generation
+// ========================================
+
+/**
+ * POST /timetable/generate — schedules the whole week atomically.
+ *
+ * The scheduling logic lives in services/timetableScheduler.js:
+ *   - never assigns a teacher to a subject they don't teach
+ *   - synchronized common-subject lessons (a subject taken by EVERY
+ *     department of a level runs at the same time in all those classes)
+ *   - most-constrained-first greedy placement + ejection-chain repair
+ *   - randomized restarts until zero missing periods
+ *
+ * This route loads the domain data, runs the scheduler and replaces the
+ * previous timetable for the academic year.
+ */
+// Only one generation may run at a time. Two concurrent generates (e.g. the
+// dashboard button and an open wizard) would interleave deleteMany +
+// insertMany and corrupt the timetable. Later requests get an immediate 409.
+let generationInProgress = false;
+
+router.post('/timetable/generate', async (req, res) => {
+  const academicYear = req.body.academicYear ||
+    `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
+  const repairMode = req.body.repair === true;
+
+  if (generationInProgress) {
+    return res.status(409).json({
+      success: false,
+      message: 'A timetable generation is already running — please wait a few seconds and try again.',
+    });
+  }
+  generationInProgress = true;
+
+  try {
+    // 1. Fetch school settings
+    const settings = await SchoolSettings.findOne({ academicYear });
+    if (!settings) {
+      return res.status(400).json({
+        success: false,
+        message: `School schedule settings not found for academic year ${academicYear}. Please save settings first.`,
+      });
+    }
+
+    const configuredDays = (req.body.schoolDays && req.body.schoolDays.length)
+      ? req.body.schoolDays
+      : (settings.schoolDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']);
+    const dayOrder = { Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
+    const schoolDays = [...new Set(configuredDays)]
+      .filter((day) => dayOrder[day])
+      .sort((a, b) => dayOrder[a] - dayOrder[b]);
+
+    // 2. Fetch active classes, teachers and subjects
+    const [classes, teachers, subjects] = await Promise.all([
+      SchoolClass.find({ isActive: true }).sort({ className: 1, department: 1, section: 1 }),
+      // Keep legacy teacher records (created before isActive was added) active.
+      User.find({
+        role: 'teacher',
+        $or: [{ isActive: true }, { isActive: { $exists: false } }],
+      }),
+      Subject.find({}),
+    ]);
+
+    // Repair mode also extends part-time teachers' availability to the full
+    // configured week so they are never silently excluded from covering gaps.
+    if (repairMode && schoolDays.length > 0) {
+      const teachersToExpand = teachers.filter(
+        (teacher) =>
+          (!!teacher.isPermanent ||
+            (Array.isArray(teacher.availableDays) && teacher.availableDays.length > 0)) &&
+          schoolDays.some((day) => !(teacher.availableDays || []).includes(day))
+      );
+      if (teachersToExpand.length > 0) {
+        await User.bulkWrite(
+          teachersToExpand.map((teacher) => ({
+            updateOne: {
+              filter: { _id: teacher._id },
+              update: { $set: { availableDays: schoolDays } },
+            },
+          }))
+        );
+        teachersToExpand.forEach((teacher) => {
+          teacher.availableDays = [...schoolDays];
+        });
+      }
+    }

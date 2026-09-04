@@ -666,6 +666,26 @@ router.post('/timetable/generate', async (req, res) => {
       });
     });
 
+    if (repairMode && schoolDays.length > 0) {
+      const expandedTeachers = [...teacherMap.values()].filter(
+        (teacher) => teacher.availabilityConfigured &&
+          schoolDays.some((day) => !teacher.availableDays.includes(day))
+      );
+      if (expandedTeachers.length > 0) {
+        await User.bulkWrite(
+          expandedTeachers.map((teacher) => ({
+            updateOne: {
+              filter: { _id: teacher.id },
+              update: { $set: { availableDays: schoolDays } },
+            },
+          }))
+        );
+        expandedTeachers.forEach((teacher) => {
+          teacher.availableDays = [...schoolDays];
+        });
+      }
+    }
+
     // 4. Build the list of assignments: { classId, subjectId, teacherIds[], periods }
     const assignments = [];
 
@@ -718,6 +738,7 @@ router.post('/timetable/generate', async (req, res) => {
           assignments.push({
             classId, className: displayName, subjectId: String(subj._id),
             subjectName: subj.name, subjectCode: subj.code, cycle,
+            classLevel: cls.className, department: cls.department, section: cls.section,
             teacherIds: [], teacherObjects: [], eligibleCount: 0,
             periods: resolvePeriodsForClass(subj, classId),
             conflict: `No teacher assigned for ${subj.name} in this class`,
@@ -752,6 +773,7 @@ router.post('/timetable/generate', async (req, res) => {
         assignments.push({
           classId, className: displayName, subjectId: String(subj._id),
           subjectName: subj.name, subjectCode: subj.code, cycle,
+          classLevel: cls.className, department: cls.department, section: cls.section,
           teacherIds: eligibleTeachers.map((t) => t.id),
           eligibleCount,
           teacherObjects: eligibleTeachers,
@@ -855,6 +877,84 @@ router.post('/timetable/generate', async (req, res) => {
       return availableTeacher ? placeEntry(assignment, slot, availableTeacher) : false;
     };
 
+    // Common subjects for the same level and section are taught concurrently
+    // across departments, but only when every department in the group has the
+    // subject. Each class still receives its own qualified teacher.
+    const commonSubjectGroups = new Map();
+    sortableAssignments.forEach((assignment) => {
+      const key = `${assignment.classLevel}|${assignment.section}|${assignment.subjectId}|${assignment.cycle}`;
+      if (!commonSubjectGroups.has(key)) commonSubjectGroups.set(key, []);
+      commonSubjectGroups.get(key).push(assignment);
+    });
+
+    const findDistinctTeachers = (group, slot) => {
+      const candidates = group
+        .map((assignment) => ({
+          assignment,
+          teachers: assignment.teacherObjects.filter((teacher) =>
+            isTeacherAvailable(teacher, slot.day) &&
+            !teacherSlotUsage.has(`${teacher.id}|${slot.day}|${slot.periodNumber}`)
+          ),
+        }))
+        .sort((a, b) => a.teachers.length - b.teachers.length);
+      const selected = new Map();
+
+      const choose = (index) => {
+        if (index >= candidates.length) return true;
+        const candidate = candidates[index];
+        for (const teacher of candidate.teachers) {
+          if (selected.has(teacher.id)) continue;
+          selected.set(teacher.id, candidate.assignment);
+          if (choose(index + 1)) return true;
+          selected.delete(teacher.id);
+        }
+        return false;
+      };
+
+      return choose(0) ? selected : null;
+    };
+
+    const placeCommonSubjectGroups = () => {
+      for (const group of commonSubjectGroups.values()) {
+        const departments = new Set(group.map((assignment) => assignment.department));
+        if (departments.size < 2 || group.some((assignment) => !assignment.teacherObjects.length)) continue;
+
+        const periodsToSync = Math.min(...group.map((assignment) => assignment.periods));
+        let placed = 0;
+        for (const allowSameDayRepeat of [false, true]) {
+          for (const day of dayNamesScarceFirst) {
+            for (const slot of slotsByDay.get(day) || []) {
+              if (placed >= periodsToSync) continue;
+              if (!allowSameDayRepeat && group.some((assignment) =>
+                generatedEntries.some((entry) =>
+                  entry.classId === assignment.classId && entry.day === day &&
+                  entry.subjectId === assignment.subjectId
+                )
+              )) continue;
+              if (group.some((assignment) => classSlotUsage.has(`${assignment.classId}|${day}|${slot.periodNumber}`))) continue;
+
+              const selected = findDistinctTeachers(group, slot);
+              if (!selected) continue;
+              let placedGroup = true;
+              for (const [teacherId, assignment] of selected) {
+                const teacher = assignment.teacherObjects.find((item) => item.id === teacherId);
+                if (!teacher || !placeEntry(assignment, slot, teacher)) {
+                  placedGroup = false;
+                  break;
+                }
+              }
+              if (placedGroup) {
+                placed += 1;
+                group.forEach((assignment) => {
+                  assignment.placedPeriods = (assignment.placedPeriods || 0) + 1;
+                });
+              }
+            }
+          }
+        }
+      }
+    };
+
     // Give every multi-period subject at least one consecutive pair where the
     // class, teacher, and configured school day have capacity.
     const placeConsecutivePair = (assignment) => {
@@ -913,11 +1013,13 @@ router.post('/timetable/generate', async (req, res) => {
       }
     };
 
-    // Pass 1: reserve a consecutive pair for every subject needing two or more periods.
+    // Pass 1: synchronize subjects shared across departments.
+    placeCommonSubjectGroups();
+    // Pass 2: reserve a consecutive pair for every remaining subject needing two or more periods.
     sortableAssignments.forEach(placeConsecutivePair);
-    // Pass 2: spread remaining periods across the week.
+    // Pass 3: spread remaining periods across the week.
     runPlacementPass(sortableAssignments, false);
-    // Pass 3: fill anything left by allowing additional same-day periods.
+    // Pass 4: fill anything left by allowing additional same-day periods.
     runPlacementPass(
       sortableAssignments.filter((a) => (a.placedPeriods || 0) < a.periods),
       true
@@ -931,7 +1033,13 @@ router.post('/timetable/generate', async (req, res) => {
 
       // Diagnosis so the UI can tell the admin EXACTLY what to change.
       const qualifiedTeachers = [...teacherMap.values()]
-        .filter((t) => t.subjectIds.includes(assignment.subjectId))
+        .filter((t) =>
+          t.subjectIds.includes(assignment.subjectId) ||
+          assignments.some(
+            (candidate) => candidate.subjectId === assignment.subjectId &&
+              candidate.teacherIds.includes(t.id)
+          )
+        )
         .map((t) => {
           const days = schoolDays.filter((day) => isTeacherAvailable(t, day));
           return { name: t.name, days, slots: days.length * periodsPerDayCount };
