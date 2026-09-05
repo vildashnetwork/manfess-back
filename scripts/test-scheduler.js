@@ -193,13 +193,17 @@ const run = async () => {
       // --- Validate every entry ---
       const teacherById = new Map(plainTeachers.map((t) => [String(t._id), t]));
       const subjectById = new Map(plainSubjects.map((s) => [String(s._id), s]));
-      const teacherKeys = new Set();
+      // Track teacher bookings by `${teacherId}|${day}|${periodNumber}` -> Set of subjectIds
+      // A teacher can teach multiple classes of the SAME subject at the same time (sync groups),
+      // but CANNOT teach different subjects at the same time.
+      const teacherBookings = new Map();
       const classKeys = new Set();
       const demand = new Map();
       plainClasses.forEach((c) => demand.set(String(c._id), new Map()));
 
       let badQual = 0;
       let badAvail = 0;
+      let teacherDoubleBook = 0;
       for (const e of result.entries) {
         const t = teacherById.get(String(e.teacherId));
         const s = subjectById.get(String(e.subjectId));
@@ -224,11 +228,19 @@ const run = async () => {
           // repair mode may fill a class the mapped teacher is not assigned to
         }
         const tk = `${e.teacherId}|${e.day}|${e.periodNumber}`;
-        if (teacherKeys.has(tk)) {
-          console.log(`    FAIL teacher double-booking: ${tk}`);
-          failed = true;
+        if (!teacherBookings.has(tk)) teacherBookings.set(tk, new Set());
+        const subjectsAtSlot = teacherBookings.get(tk);
+        // A teacher can teach the same subject to multiple classes at the same time (sync),
+        // but cannot teach DIFFERENT subjects at the same time.
+        if (subjectsAtSlot.size > 0 && !subjectsAtSlot.has(String(e.subjectId))) {
+          teacherDoubleBook += 1;
+          if (teacherDoubleBook <= 10) {
+            console.log(
+              `    FAIL teacher double-booking: ${tk} subjects=[${[...subjectsAtSlot].join(',')}]+${e.subjectId}`
+            );
+          }
         }
-        teacherKeys.add(tk);
+        subjectsAtSlot.add(String(e.subjectId));
         const ck = `${e.classId}|${e.day}|${e.periodNumber}`;
         if (classKeys.has(ck)) {
           console.log(`    FAIL class double-booking: ${ck}`);
@@ -240,6 +252,7 @@ const run = async () => {
       }
       check('all teachers qualified for subject', badQual === 0);
       check('all entries respect teacher availability', badAvail === 0);
+      check('no teacher double-booking', teacherDoubleBook === 0);
 
       // --- Per (class, subject) demand vs placed ---
       // Over-placement is always a bug (never exceed the requested periods).

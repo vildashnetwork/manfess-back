@@ -315,6 +315,7 @@ export function generateTimetableSchedule(input) {
     const classBusy = new Set(); // `${classId}|${day}|${periodNumber}`
     const generated = [];
     const teacherLoad = new Map(); // teacherId -> placed periods
+    const syncRefCount = new Map(); // `${teacherId}|${day}|${periodNumber}` -> sync entry count
 
     schedulable.forEach((a) => {
       a.placedPeriods = 0;
@@ -377,6 +378,38 @@ export function generateTimetableSchedule(input) {
       return true;
     };
 
+    // placeSync: place a class in a synchronized common-subject lesson.
+    // Same as place() but skips the teacherFree check so the same teacher can
+    // teach multiple classes at the same time (one teacher -> many classes).
+    const placeSync = (assignment, slot, teacher) => {
+      if (!classFree(assignment.classId, slot)) return false;
+      if (assignment.placedPeriods >= assignment.effectivePeriods) return false;
+
+      notePair(assignment, slot);
+      const entry = {
+        teacherId: teacher.id,
+        classId: assignment.classId,
+        subjectId: assignment.subjectId,
+        day: slot.day,
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        periodNumber: slot.periodNumber,
+        cycle: assignment.cycle,
+        ratePerPeriod: assignment.cycle === 'first' ? 500 : 700,
+        room: '',
+        academicYear,
+        isActive: true,
+        _assignment: assignment,
+        isSync: true,
+      };
+      generated.push(entry);
+      assignment.entries.push({ slot, teacher, entry });
+      classBusy.add(slotKey(assignment.classId, slot));
+      assignment.placedPeriods += 1;
+      teacherLoad.set(teacher.id, (teacherLoad.get(teacher.id) || 0) + 1);
+      return true;
+    };
+
     const unplace = (record) => {
       const { slot, teacher, entry } = record;
       const owner = entry._assignment;
@@ -384,7 +417,22 @@ export function generateTimetableSchedule(input) {
       if (idx >= 0) generated.splice(idx, 1);
       const eIdx = owner.entries.indexOf(record);
       if (eIdx >= 0) owner.entries.splice(eIdx, 1);
-      teacherBusy.delete(slotKey(teacher.id, slot));
+      // Handle teacherBusy with reference counting for sync entries.
+      // A sync entry's teacher is shared across multiple classes at the same
+      // slot, so we only clear teacherBusy when the last sync entry for that
+      // (teacher, slot) is removed.
+      const tk = slotKey(teacher.id, slot);
+      if (entry.isSync) {
+        const count = syncRefCount.get(tk) || 0;
+        if (count <= 1) {
+          teacherBusy.delete(tk);
+          syncRefCount.delete(tk);
+        } else {
+          syncRefCount.set(tk, count - 1);
+        }
+      } else {
+        teacherBusy.delete(tk);
+      }
       classBusy.delete(slotKey(owner.classId, slot));
       owner.placedPeriods = Math.max(0, owner.placedPeriods - 1);
       owner.hasConsecutivePair = owner.entries.some((r, i) =>
@@ -478,28 +526,20 @@ export function generateTimetableSchedule(input) {
     };
 
 
-    // Best-effort group matching: fit as many DISTINCT teachers as possible to
-    // this slot (each class always gets its own qualified teacher). The match
-    // may cover only a subset of the group when the staff cannot cover the
-    // full group in parallel — lessons are never dropped because of it.
-    const matchPartial = (members, slot) => {
-      const candidates = members
-        .map((assignment) => ({
-          assignment,
-          teachers: freeTeachersFor(assignment, slot).sort(
-            (a, b) => (teacherLoad.get(a.id) || 0) - (teacherLoad.get(b.id) || 0)
-          ),
-        }))
-        .sort((a, b) => a.teachers.length - b.teachers.length);
-      const selected = new Map();
-      candidates.forEach((candidate) => {
-        for (const teacher of candidate.teachers) {
-          if (selected.has(teacher.id)) continue;
-          selected.set(teacher.id, candidate.assignment);
-          break;
-        }
-      });
-      return selected;
+    // Find ONE teacher who can teach ALL member classes at this slot.
+    // Returns the least-loaded teacher from the intersection of eligible
+    // teachers across all member classes, or null if no shared teacher exists.
+    const findSharedTeacher = (members, slot) => {
+      const firstMember = members[0];
+      const sharedTeachers = firstMember.teacherObjects.filter((t) =>
+        isTeacherAvailable(t, slot.day) &&
+        !teacherBusy.has(slotKey(t.id, slot)) &&
+        members.every((a) => a.teacherObjects.some((ot) => ot.id === t.id))
+      );
+      if (sharedTeachers.length === 0) return null;
+      return sharedTeachers.sort((a, b) =>
+        (teacherLoad.get(a.id) || 0) - (teacherLoad.get(b.id) || 0)
+      )[0];
     };
 
     const slotOrderRotated = () => {
@@ -513,6 +553,10 @@ export function generateTimetableSchedule(input) {
     };
 
     // ----- Phase A: synchronized common subjects -----
+    // For common groups, ONE teacher teaches ALL member classes at the same
+    // time. This creates multiple timetable entries (one per class) with the
+    // same teacher/day/time. If no single teacher can cover all classes at a
+    // given slot, we skip that slot and try the next one.
     const syncDetails = [];
     commonGroups.forEach((group) => {
       const { members, target } = group;
@@ -531,15 +575,12 @@ export function generateTimetableSchedule(input) {
             continue;
           }
           if (candidates.some((a) => !classFree(a.classId, slot))) continue;
-          const matched = matchPartial(candidates, slot);
-          // A slot only counts as a "synchronized lesson" when at least two
-          // departments run the subject at the same time.
-          if (matched.size < 2) continue;
+          const teacher = findSharedTeacher(candidates, slot);
+          if (!teacher) continue;
           const placedRecords = [];
           let allPlaced = true;
-          for (const [teacherId, assignment] of matched) {
-            const teacher = assignment.teacherObjects.find((t) => t.id === teacherId);
-            if (!teacher || !place(assignment, slot, teacher)) {
+          for (const assignment of candidates) {
+            if (!placeSync(assignment, slot, teacher)) {
               allPlaced = false;
               break;
             }
@@ -547,11 +588,13 @@ export function generateTimetableSchedule(input) {
           }
           if (allPlaced) {
             synced += 1;
-            for (const assignment of matched.values()) {
+            const tk = slotKey(teacher.id, slot);
+            teacherBusy.add(tk);
+            syncRefCount.set(tk, candidates.length);
+            for (const assignment of candidates) {
               assignment.syncPlaced += 1;
             }
           } else {
-            // Roll back the partial placement so the group stays atomic.
             placedRecords.forEach((record) => unplace(record));
           }
         }
@@ -564,7 +607,7 @@ export function generateTimetableSchedule(input) {
         classes: members.length,
         targetPeriods: target,
         syncedPeriods: synced,
-        teachersNeededForFullParallel: members.length,
+        teachersNeededForFullParallel: 1,
         teacherOptions: group.minTeacherOptions,
       });
     });
