@@ -286,6 +286,36 @@ const run = async () => {
       check('no over-placement', over === 0);
       // Under-placement is informational only (auto-reduce working as intended)
 
+      // --- Missing class mapping diagnostics ---
+      // Shows teachers assigned to subjects but not mapped to classes that take them
+      const missingMappings = new Map(); // teacherName -> [{className, subjectName}]
+      const teacherLookup = new Map();
+      plainTeachers.forEach(t => teacherLookup.set(String(t._id), t));
+      plainClasses.forEach((c) => {
+        const cid = String(c._id);
+        plainSubjects.forEach((s) => {
+          if (!(s.classIds || []).includes(cid)) return;
+          const expected = periodsFor(s, cid);
+          const got = demand.get(cid)?.get(String(s._id)) || 0;
+          if (got < expected) {
+            // Find teachers assigned to this subject but not mapped to this class
+            const subjTeachers = (s.teacherIds || []).map(tid => teacherLookup.get(String(tid))).filter(Boolean);
+            const missing = subjTeachers.filter(t => !t.classIds.includes(cid));
+            missing.forEach(t => {
+              const key = t.name;
+              if (!missingMappings.has(key)) missingMappings.set(key, []);
+              missingMappings.get(key).push({ className: c.className, subjectName: s.name });
+            });
+          }
+        });
+      });
+      if (missingMappings.size > 0) {
+        console.log('  Teachers not mapped to classes they\'re assigned:');
+        missingMappings.forEach((entries, tname) => {
+          console.log(`    ${tname}: ${entries.map(e => `${e.subjectName} in ${e.className}`).join(', ')}`);
+        });
+      }
+
       // --- Common-subject synchronization report ---
       const details = result.stats.syncDetails || [];
       console.log(

@@ -190,24 +190,27 @@ export function generateTimetableSchedule(input) {
         }
       };
 
-      // (1) Teachers explicitly assigned to the subject in Subjects & Periods.
-      //     An explicit assignment authorizes the teacher for this subject in
-      //     every class that takes the subject (fixes e.g. Accounting being
-      //     reported as "nobody yet" although a teacher is assigned to it).
-      (subj.teacherIds || []).forEach((tid) => push(teacherMap.get(String(tid))));
+      // (1) Teachers explicitly assigned to the subject in Subjects & Periods
+      //     AND mapped to this class. A teacher only teaches classes they're
+      //     assigned to — explicit subject assignment does NOT authorize them
+      //     for classes outside their class mapping.
+      (subj.teacherIds || []).forEach((tid) => {
+        const t = teacherMap.get(String(tid));
+        if (t && t.classIds.includes(classId)) push(t);
+      });
 
       // (2) Teachers qualified for the subject AND mapped to this class.
       teacherList.forEach((t) => {
         if (t.subjectIds.includes(String(subj._id)) && t.classIds.includes(classId)) push(t);
       });
 
-      // (3) Repair mode: any other subject-qualified teacher may substitute.
+      // (3) Auto-map: any subject-qualified teacher may teach any class.
+      //     This ensures common subjects can be synced across departments
+      //     even when teachers aren't explicitly mapped to every class.
       //     A teacher is NEVER assigned a subject they don't teach.
-      if (repairMode) {
-        teacherList.forEach((t) => {
-          if (t.subjectIds.includes(String(subj._id))) push(t);
-        });
-      }
+      teacherList.forEach((t) => {
+        if (t.subjectIds.includes(String(subj._id))) push(t);
+      });
 
       assignments.push({
         classId,
@@ -379,11 +382,20 @@ export function generateTimetableSchedule(input) {
     };
 
     // placeSync: place a class in a synchronized common-subject lesson.
-    // Same as place() but skips the teacherFree check so the same teacher can
-    // teach multiple classes at the same time (one teacher -> many classes).
+    // Same as place() but allows the same teacher to teach multiple classes
+    // at the same time — but ONLY for the SAME subject. A teacher cannot
+    // teach different subjects simultaneously.
+    const teacherSubjectAtSlot = new Map(); // `${teacherId}|${slotKey}` -> subjectId
     const placeSync = (assignment, slot, teacher) => {
       if (!classFree(assignment.classId, slot)) return false;
       if (assignment.placedPeriods >= assignment.effectivePeriods) return false;
+
+      // Check: teacher must not be teaching a DIFFERENT subject at this slot
+      const tsk = `${teacher.id}|${slotKey(teacher.id, slot)}`;
+      const existingSubject = teacherSubjectAtSlot.get(tsk);
+      if (existingSubject && existingSubject !== assignment.subjectId) {
+        return false; // teacher already busy with a different subject
+      }
 
       notePair(assignment, slot);
       const entry = {
@@ -405,6 +417,18 @@ export function generateTimetableSchedule(input) {
       generated.push(entry);
       assignment.entries.push({ slot, teacher, entry });
       classBusy.add(slotKey(assignment.classId, slot));
+
+      // Track teacher busy state with reference counting for sync entries
+      const tk = slotKey(teacher.id, slot);
+      if (!entry.isSync || !teacherBusy.has(tk)) {
+        teacherBusy.add(tk);
+        syncRefCount.set(tk, 1);
+        teacherSubjectAtSlot.set(tsk, assignment.subjectId);
+      } else {
+        // Another class for the same subject at the same slot
+        syncRefCount.set(tk, (syncRefCount.get(tk) || 0) + 1);
+      }
+
       assignment.placedPeriods += 1;
       teacherLoad.set(teacher.id, (teacherLoad.get(teacher.id) || 0) + 1);
       return true;
@@ -477,17 +501,21 @@ export function generateTimetableSchedule(input) {
             (dayOrder[a] || 9) - (dayOrder[b] || 9)
         );
 
-    // Candidate slots for one assignment on one day, best first: prefer
-    // slots adjacent to an existing same-subject period (consecutive pair),
-    // then earlier periods, with a random jitter so restarts differ.
+    // Candidate slots for one assignment on one day, best first:
+    // 1. Slots adjacent to an existing same-subject period (consecutive pair)
+    // 2. Earlier periods, with a random jitter so restarts differ.
+    // For multi-period subjects, consecutive placement is REQUIRED — the
+    // teacher teaches one period and the next period is still the same subject.
     const candidateSlots = (assignment, day) => {
       const slots = (slotsByDay.get(day) || []).filter(
         (slot) =>
           classFree(assignment.classId, slot) && freeTeachersFor(assignment, slot).length > 0
       );
       const adjacent = new Set();
+      const sameDayPeriods = new Set();
       assignment.entries.forEach((e) => {
         if (e.slot.day === day) {
+          sameDayPeriods.add(e.slot.periodNumber);
           adjacent.add(e.slot.periodNumber - 1);
           adjacent.add(e.slot.periodNumber + 1);
         }
@@ -501,6 +529,33 @@ export function generateTimetableSchedule(input) {
       return slots;
     };
 
+    // Try to place a subject's periods as a consecutive block on one day.
+    // Returns true if the placement succeeds.
+    const placeConsecutiveBlock = (assignment, day, teacher, startSlot, count) => {
+      const slots = slotsByDay.get(day) || [];
+      const block = [];
+      for (let i = 0; i < count; i++) {
+        const slot = slots.find((s) => s.periodNumber === startSlot.periodNumber + i);
+        if (!slot || !classFree(assignment.classId, slot)) return false;
+        if (freeTeachersFor(assignment, slot).length === 0) return false;
+        block.push(slot);
+      }
+      // Place all slots in the block
+      for (const slot of block) {
+        const t = pickTeacher(assignment, slot) || teacher;
+        if (!place(assignment, slot, t)) {
+          // Rollback
+          for (const placedSlot of block) {
+            if (placedSlot === slot) break;
+            const lastEntry = assignment.entries[assignment.entries.length - 1];
+            if (lastEntry) unplace(lastEntry);
+          }
+          return false;
+        }
+      }
+      return true;
+    };
+
     const placeAssignmentGreedy = (assignment, allowSameDay) => {
       let guard = 0;
       while (assignment.placedPeriods < assignment.effectivePeriods && guard < 60) {
@@ -509,18 +564,46 @@ export function generateTimetableSchedule(input) {
         const days = daysForAssignment(assignment);
         // Rotate the starting day so restarts explore different layouts.
         const offset = Math.floor(rng() * Math.max(1, days.length));
-        for (let di = 0; di < days.length; di += 1) {
-          if (assignment.placedPeriods >= assignment.effectivePeriods) break;
-          const day = days[(di + offset) % days.length];
-          if (!allowSameDay && assignment.entries.some((e) => e.slot.day === day)) continue;
-          for (const slot of candidateSlots(assignment, day)) {
+        const remaining = assignment.effectivePeriods - assignment.placedPeriods;
+
+        // For multi-period subjects, try consecutive block placement first.
+        // The teacher teaches one period and the next period is still the same subject.
+        if (remaining >= 2) {
+          for (let di = 0; di < days.length; di += 1) {
             if (assignment.placedPeriods >= assignment.effectivePeriods) break;
-            const teacher = pickTeacher(assignment, slot);
-            if (teacher && place(assignment, slot, teacher)) {
-              placedThisRound += 1;
+            const day = days[(di + offset) % days.length];
+            if (!allowSameDay && assignment.entries.some((e) => e.slot.day === day)) continue;
+            const slots = slotsByDay.get(day) || [];
+            // Try to find a consecutive block of `remaining` periods
+            for (const startSlot of slots) {
+              if (assignment.placedPeriods >= assignment.effectivePeriods) break;
+              const teacher = pickTeacher(assignment, startSlot);
+              if (!teacher) continue;
+              if (placeConsecutiveBlock(assignment, day, teacher, startSlot, remaining)) {
+                placedThisRound += remaining;
+                break;
+              }
+            }
+            if (placedThisRound > 0) break;
+          }
+        }
+
+        // Fallback: single-period placement (for remaining periods or if block placement failed)
+        if (placedThisRound === 0) {
+          for (let di = 0; di < days.length; di += 1) {
+            if (assignment.placedPeriods >= assignment.effectivePeriods) break;
+            const day = days[(di + offset) % days.length];
+            if (!allowSameDay && assignment.entries.some((e) => e.slot.day === day)) continue;
+            for (const slot of candidateSlots(assignment, day)) {
+              if (assignment.placedPeriods >= assignment.effectivePeriods) break;
+              const teacher = pickTeacher(assignment, slot);
+              if (teacher && place(assignment, slot, teacher)) {
+                placedThisRound += 1;
+              }
             }
           }
         }
+
         if (placedThisRound === 0) break;
       }
     };
@@ -610,6 +693,23 @@ export function generateTimetableSchedule(input) {
         teachersNeededForFullParallel: 1,
         teacherOptions: group.minTeacherOptions,
       });
+
+      // KEY FIX: Always reduce ALL members' effectivePeriods to the synced count.
+      // This ensures common subjects are either ALL synced (all departments at
+      // same time) with the same number of periods, or reduced to what's possible.
+      // Without this, departments with more periods would have Phase B place
+      // their extra periods separately, breaking the sync.
+      for (const assignment of members) {
+        if (assignment.effectivePeriods > synced) {
+          assignment.effectivePeriods = synced;
+        }
+      }
+      // Also reduce the requested periods so the auto-reduce doesn't fight this
+      for (const assignment of members) {
+        if (assignment.periods > synced) {
+          assignment.periods = synced;
+        }
+      }
     });
 
     // ----- Phase B: greedy placement, most constrained first -----
