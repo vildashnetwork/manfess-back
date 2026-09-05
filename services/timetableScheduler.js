@@ -661,27 +661,128 @@ export function generateTimetableSchedule(input) {
       (sum, a) => sum + Math.max(0, a.effectivePeriods - a.placedPeriods),
       0
     );
+    // Snapshot per-assignment placement so the outer loop can inspect the
+    // exact state of THIS attempt even after later attempts mutate it.
+    const placedSnapshot = schedulable.map((a) => ({
+      a,
+      placed: a.placedPeriods,
+      effective: a.effectivePeriods,
+      sync: a.syncPlaced,
+    }));
     const pairs = schedulable.filter((a) => a.hasConsecutivePair).length;
-    return { generated, missing, pairs, syncDetails };
+    return { generated, missing, pairs, syncDetails, placedSnapshot };
   };
 
 
-  // ---------- 6. Restarts: keep the best attempt ----------
+  // ---------- 6. Rounds with restarts + auto-reduce ----------
+  // Run scheduling attempts. When an assignment still cannot be placed after a
+  // generous repair budget, the scheduler automatically reduces that subject's
+  // period count for this class (never touching teachers' configured days) so
+  // the timetable always finishes complete. The BEST schedule found is kept.
   let best = null;
+  let bestSeed = null;
   let attemptsUsed = 0;
-  for (let i = 0; i < Math.max(1, maxAttempts); i += 1) {
-    attemptsUsed = i + 1;
-    const rng = mulberry32(seed + i * 7919);
-    const attempt = runAttempt(rng);
+  let reduced = new Map(); // `${classId}|${subjectId}` -> number removed
+  const rounds = 6;
+
+  for (let round = 0; round < rounds; round += 1) {
+    let roundBest = null;
+    let roundBestSeed = null;
+    const roundSnapshots = [];
+    const localBudget =
+      round === 0 ? Math.max(3, maxAttempts) : Math.max(3, Math.floor(maxAttempts / 3));
+    for (let i = 0; i < localBudget; i += 1) {
+      attemptsUsed += 1;
+      const rngSeed = seed + round * 7727 + i * 7919;
+      const rng = mulberry32(rngSeed);
+      const attempt = runAttempt(rng);
+      roundSnapshots.push(attempt.placedSnapshot);
+      if (
+        !roundBest ||
+        attempt.missing < roundBest.missing ||
+        (attempt.missing === roundBest.missing && attempt.pairs > roundBest.pairs)
+      ) {
+        roundBest = attempt;
+        roundBestSeed = rngSeed;
+      }
+      if (roundBest.missing === 0) break;
+      if (Date.now() - startedAt > timeBudgetMs) break;
+    }
+
     if (
       !best ||
-      attempt.missing < best.missing ||
-      (attempt.missing === best.missing && attempt.pairs > best.pairs)
+      !roundBest ||
+      roundBest.missing < best.missing ||
+      (roundBest.missing === best.missing && roundBest.pairs > best.pairs)
     ) {
-      best = attempt;
+      best = roundBest;
+      bestSeed = roundBestSeed;
     }
     if (best.missing === 0) break;
+
+    // Auto-reduce: aggressively trim assignments that were missing in EVERY
+    // attempt of this round (a "persistently missing" signal). For those,
+    // lower effectivePeriods to the best (max) placed count we actually
+    // achieved across all attempts this round — keeping the target reachable
+    // next round. Allow dropping to 0 so genuinely unplaceable subjects don't
+    // stay as phantom conflicts.
+    if (roundSnapshots.length > 0) {
+      const persist = new Map(); // assignment -> { miss, seen, maxPlaced }
+      roundSnapshots.forEach((snapshot) => {
+        snapshot.forEach(({ a, placed }) => {
+          const rec = persist.get(a) || { miss: 0, seen: 0, maxPlaced: 0 };
+          rec.seen += 1;
+          rec.maxPlaced = Math.max(rec.maxPlaced, placed);
+          if (placed < a.effectivePeriods) rec.miss += 1;
+          persist.set(a, rec);
+        });
+      });
+      for (const [a, rec] of persist) {
+        if (rec.miss === rec.seen && rec.seen > 0 && a.effectivePeriods > 0) {
+          const newEff = Math.max(0, rec.maxPlaced);
+          if (newEff < a.effectivePeriods) {
+            const key = `${a.classId}|${a.subjectId}`;
+            reduced.set(key, (reduced.get(key) || 0) + (a.effectivePeriods - newEff));
+            a.effectivePeriods = newEff;
+          }
+        }
+      }
+    }
+
     if (Date.now() - startedAt > timeBudgetMs) break;
+  }
+
+  // Guarantee a COMPLETE timetable: after all rounds, the best attempt's
+  // placedSnapshot tells us exactly how many periods each assignment could
+  // place. Trim effectivePeriods to match — the timetable is then complete
+  // by construction (effectivePeriods === placedPeriods for every assignment).
+  // We do NOT re-run runAttempt: the generated entries ARE the timetable.
+  if (!best) {
+    const rng = mulberry32(seed + 1234567);
+    best = runAttempt(rng);
+    bestSeed = seed + 1234567;
+  }
+  if (best.missing > 0) {
+    // Restore each assignment's placedPeriods from the best attempt's snapshot
+    // (a.placedPeriods currently holds the LAST attempt's value, not the best).
+    best.placedSnapshot.forEach(({ a, placed }) => {
+      a.placedPeriods = placed;
+      if (placed < a.effectivePeriods) {
+        const newEff = Math.max(0, placed);
+        const trim = a.effectivePeriods - newEff;
+        if (trim > 0) {
+          const key = `${a.classId}|${a.subjectId}`;
+          reduced.set(key, (reduced.get(key) || 0) + trim);
+          a.effectivePeriods = newEff;
+        }
+      }
+    });
+    // After trimming, effectivePeriods === placed for every assignment,
+    // so missing is 0 by construction.
+    best.missing = schedulable.reduce(
+      (sum, a) => sum + Math.max(0, a.effectivePeriods - a.placedPeriods),
+      0
+    );
   }
 
   // Detach internal references from the winning entries.
@@ -695,12 +796,12 @@ export function generateTimetableSchedule(input) {
   const conflicts = [];
   const classDemand = new Map();
   assignments.forEach((a) => {
-    classDemand.set(a.classId, (classDemand.get(a.classId) || 0) + a.periods);
+    classDemand.set(a.classId, (classDemand.get(a.classId) || 0) + a.effectivePeriods);
   });
   const totalSlotsPerClass = allSlots.length;
 
   const buildConflict = (assignment) => {
-    const missing = Math.max(0, assignment.periods - (assignment.placedPeriods || 0));
+    const missing = Math.max(0, assignment.effectivePeriods - (assignment.placedPeriods || 0));
     if (missing <= 0) return null;
 
     const qualifiedTeachers = teacherList
@@ -719,7 +820,7 @@ export function generateTimetableSchedule(input) {
       });
     const subjectWeeklyDemand = assignments
       .filter((a) => a.subjectId === assignment.subjectId)
-      .reduce((sum, a) => sum + a.periods, 0);
+      .reduce((sum, a) => sum + a.effectivePeriods, 0);
     const qualifiedTeacherSlots = qualifiedTeachers.reduce((sum, t) => sum + t.slots, 0);
     const subjectShortfall = Math.max(0, subjectWeeklyDemand - qualifiedTeacherSlots);
     const demand = classDemand.get(assignment.classId) || 0;
@@ -765,7 +866,7 @@ export function generateTimetableSchedule(input) {
       subjectName: assignment.subjectName,
       teacherId: assignment.teacherIds[0] || null,
       teacherName: assignment.teacherObjects[0]?.name || 'Unknown',
-      requestedPeriods: assignment.periods,
+      requestedPeriods: assignment.effectivePeriods,
       placedPeriods: assignment.placedPeriods || 0,
       missingPeriods: missing,
       reason: `No free slot with a qualified ${assignment.subjectName} teacher — the scheduler placed every other period (class uses ${assignment.placedPeriods}/${demand} weekly slots)`,
@@ -803,7 +904,18 @@ export function generateTimetableSchedule(input) {
   });
 
   const requested = assignments.reduce((sum, a) => sum + a.periods, 0);
+  const requestedEffective = assignments.reduce((sum, a) => sum + a.effectivePeriods, 0);
   const placedTotal = schedulable.reduce((sum, a) => sum + a.placedPeriods, 0);
+
+  const reducedDetails = [...reduced.entries()].map(([key, count]) => {
+    const [classId, subjectId] = key.split('|');
+    const a = assignments.find((x) => x.classId === classId && x.subjectId === subjectId);
+    return {
+      className: a?.className || classId,
+      subjectName: a?.subjectName || subjectId,
+      reducedBy: count,
+    };
+  });
 
   return {
     entries: generatedEntries,
@@ -817,6 +929,8 @@ export function generateTimetableSchedule(input) {
       durationMs: Date.now() - startedAt,
       consecutivePairs: best.pairs,
       syncDetails: best.syncDetails,
+      reducedCount: requested - requestedEffective,
+      reducedDetails,
     },
   };
 }

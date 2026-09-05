@@ -586,29 +586,12 @@ router.post('/timetable/generate', async (req, res) => {
       Subject.find({}),
     ]);
 
-    // Repair mode also extends part-time teachers' availability to the full
-    // configured week so they are never silently excluded from covering gaps.
-    if (repairMode && schoolDays.length > 0) {
-      const teachersToExpand = teachers.filter(
-        (teacher) =>
-          (!!teacher.isPermanent ||
-            (Array.isArray(teacher.availableDays) && teacher.availableDays.length > 0)) &&
-          schoolDays.some((day) => !(teacher.availableDays || []).includes(day))
-      );
-      if (teachersToExpand.length > 0) {
-        await User.bulkWrite(
-          teachersToExpand.map((teacher) => ({
-            updateOne: {
-              filter: { _id: teacher._id },
-              update: { $set: { availableDays: schoolDays } },
-            },
-          }))
-        );
-        teachersToExpand.forEach((teacher) => {
-          teacher.availableDays = [...schoolDays];
-        });
-      }
-    }
+    // NOTE: Fix All Conflicts never changes a teacher's configured days.
+    // Teachers' availability (isPermanent/availableDays) is strictly respected
+    // by the scheduler; when a conflict genuinely cannot be placed, the
+    // scheduler auto-reduces that subject's period count instead of moving
+    // days around.
+
     // 3. Run the scheduler
     const result = generateTimetableSchedule({
       classes,
