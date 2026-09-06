@@ -265,12 +265,10 @@ export function generateTimetableSchedule(input) {
 
     groups.forEach((members, key) => {
       const levelKey = key.split('|').slice(0, 3).join('|');
-      const allDepartments = levelDepartments.get(levelKey) || new Set();
       const memberDepartments = new Set(members.map((a) => a.department));
       const classIds = new Set(members.map((a) => a.classId));
       const isCommon =
-        allDepartments.size >= 2 &&
-        memberDepartments.size === allDepartments.size &&
+        memberDepartments.size >= 2 &&
         classIds.size === members.length;
       if (isCommon) {
         members.forEach((a) => {
@@ -280,7 +278,7 @@ export function generateTimetableSchedule(input) {
           key,
           members,
           levelKey,
-          departments: [...allDepartments],
+          departments: [...memberDepartments],
           target: Math.min(...members.map((a) => a.periods)),
           minTeacherOptions: Math.min(...members.map((a) => a.eligibleCount)),
         });
