@@ -204,13 +204,11 @@ export function generateTimetableSchedule(input) {
         if (t.subjectIds.includes(String(subj._id)) && t.classIds.includes(classId)) push(t);
       });
 
-      // (3) Auto-map: any subject-qualified teacher may teach any class.
-      //     This ensures common subjects can be synced across departments
-      //     even when teachers aren't explicitly mapped to every class.
-      //     A teacher is NEVER assigned a subject they don't teach.
-      teacherList.forEach((t) => {
-        if (t.subjectIds.includes(String(subj._id))) push(t);
-      });
+      // Do not infer a teacher-to-class assignment. The class list on a
+      // teacher record is an explicit scheduling constraint (especially for
+      // visiting teachers with limited days). Giving every subject-qualified
+      // teacher every class here made the generator produce lessons that were
+      // not in the school's teacher allocation sheet.
 
       assignments.push({
         classId,

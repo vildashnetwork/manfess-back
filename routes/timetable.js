@@ -121,8 +121,42 @@ router.post('/timetable', async (req, res) => {
       });
     }
 
-    // ✅ ONLY CONFLICT CHECK: Teacher cannot be in two different classes at the same time
-    // This allows multiple subjects in the SAME class at the same time
+    // A class can only hold ONE period in a given time slot. If the same class
+    // already has a period at this day + startTime, block the add.
+    const classConflict = await Timetable.findOne({
+      classId,
+      day,
+      startTime,
+      academicYear: academicYear || '2026-2027'
+    });
+
+    if (classConflict) {
+      const conflictWithDetails = await Timetable.findById(classConflict._id)
+        .populate('subjectId', 'name code')
+        .populate('classId', 'className department');
+      const conflictSubjectName = conflictWithDetails.subjectId?.name || 'Unknown Subject';
+      const conflictClassName = conflictWithDetails.classId?.className || 'Unknown Class';
+      return res.status(400).json({
+        success: false,
+        message: `Class \"${'${conflictClassName}'}\" already has \"${'${conflictSubjectName}'}\" (${'${classConflict.startTime}'}) on ${'${day}'}. A class can only be assigned one period in this time slot.`,
+        conflict: {
+          classId,
+          day: day,
+          startTime: startTime,
+          existingClass: conflictClassName,
+          existingSubject: conflictSubjectName,
+          existingTime: `${'${classConflict.startTime}'} - ${'${classConflict.endTime}'}`,
+          existingEntryId: classConflict._id
+        }
+      });
+    }
+
+    // Only block a genuine duplicate: the SAME teacher booked for the SAME
+
+    // Only block a genuine duplicate: the SAME teacher booked for the SAME
+    // class at the SAME time. A teacher may teach multiple classes in one
+    // period (combined classes), and one class may host multiple subjects
+    // as long as each subject uses a different teacher.
     const teacherConflict = await Timetable.findOne({
       teacherId,
       day,
@@ -139,32 +173,12 @@ router.post('/timetable', async (req, res) => {
 
       const conflictClassName = conflictWithDetails.classId?.className || 'Unknown Class';
       const conflictSubjectName = conflictWithDetails.subjectId?.name || 'Unknown Subject';
-      const conflictTeacherName = conflictWithDetails.teacherId?.name || 'Unknown Teacher';
 
-      // ✅ Check if it's the SAME class - if so, it's ALLOWED (multiple subjects in same class)
+      // Same class + same teacher + same time = duplicate booking -> block.
       if (teacherConflict.classId.toString() === classId) {
-        console.log('✅ Same class, different subject - ALLOWED:', {
-          teacher: teacher.name,
-          class: conflictClassName,
-          existingSubject: conflictSubjectName,
-          newSubject: subject.name,
-          day,
-          startTime
-        });
-        // Allow it - multiple subjects in same class at same time
-      } else {
-        // ❌ Different class - CONFLICT (teacher can't be in two classes at once)
-        console.log('❌ Teacher conflict - Different classes:', {
-          teacher: teacher.name,
-          existingClass: conflictClassName,
-          newClass: classExists.className,
-          day,
-          startTime
-        });
-
         return res.status(400).json({
           success: false,
-          message: `Teacher "${teacher.name}" is already teaching "${conflictSubjectName}" to "${conflictClassName}" from ${conflictWithDetails.startTime} to ${conflictWithDetails.endTime} on ${day}. Cannot also teach "${subject.name}" to "${classExists.className}" at the same time.`,
+          message: `Teacher "${teacher.name}" is already teaching "${conflictSubjectName}" to "${conflictClassName}" from ${conflictWithDetails.startTime} to ${conflictWithDetails.endTime} on ${day}.`,
           conflict: {
             teacherId: teacherId,
             teacherName: teacher.name,
@@ -179,8 +193,16 @@ router.post('/timetable', async (req, res) => {
           }
         });
       }
-    }
 
+      // Different class -> allowed (combined classes).
+      console.log('Teacher teaching multiple classes in same period - ALLOWED:', {
+        teacher: teacher.name,
+        existingClass: conflictClassName,
+        newClass: classExists.className,
+        day,
+        startTime
+      });
+    }
     // ✅ ALLOWED: Multiple teachers can teach different subjects in the SAME class at the same time
     // No check for classId + day + startTime - this allows multiple subjects per class
 
@@ -222,7 +244,7 @@ router.post('/timetable', async (req, res) => {
       // Check if it's a teacher conflict (unique index)
       return res.status(400).json({
         success: false,
-        message: 'Teacher already has a period at this time. Cannot assign to two different classes.'
+        message: 'This teacher is already booked for this class at this time.'
       });
     }
     res.status(500).json({
@@ -267,7 +289,26 @@ router.post('/timetable/bulk', async (req, res) => {
           continue;
         }
 
-        // Check for teacher conflict (different class only)
+        // A class can only hold ONE period in a given time slot.
+        const classConflict = await Timetable.findOne({
+          classId,
+          day,
+          startTime,
+          academicYear: academicYear || '2026-2027'
+        });
+
+        if (classConflict) {
+          errors.push({
+            entry,
+            error: `Class already has a period at ${'${day}'} ${'${startTime}'}. A class can only be assigned one period in this time slot.`
+          });
+          continue;
+        }
+        // Only a genuine duplicate (same teacher + same class + same time)
+
+        // Only a genuine duplicate (same teacher + same class + same time)
+        // is rejected. The same teacher may teach different classes in one
+        // period (combined classes).
         const teacherConflict = await Timetable.findOne({
           teacherId,
           day,
@@ -275,17 +316,13 @@ router.post('/timetable/bulk', async (req, res) => {
           academicYear: academicYear || '2026-2027'
         });
 
-        if (teacherConflict) {
-          // If it's the SAME class, allow it (multiple subjects)
-          if (teacherConflict.classId.toString() !== classId) {
-            errors.push({
-              entry,
-              error: `Teacher "${teacher.name}" already has a period in another class at this time on ${day}`
-            });
-            continue;
-          }
+        if (teacherConflict && teacherConflict.classId.toString() === classId) {
+          errors.push({
+            entry,
+            error: `Teacher "${teacher.name}" is already booked for this class at this time on ${day}`
+          });
+          continue;
         }
-
         const ratePerPeriod = cycle === 'first' ? 500 : 700;
 
         const timetableEntry = new Timetable({
@@ -370,7 +407,29 @@ router.put('/timetable/:id', async (req, res) => {
         });
       }
 
-      // Check if new teacher already has a period at this time (different class only)
+      // A class can only hold ONE period in a given time slot (excluding itself).
+      const classConflict = await Timetable.findOne({
+        classId: classId || timetable.classId,
+        day: day || timetable.day,
+        startTime: startTime || timetable.startTime,
+        academicYear: academicYear || timetable.academicYear || '2026-2027',
+        _id: { $ne: id }
+      });
+
+      if (classConflict) {
+        const conflictClass = await SchoolClass.findById(classConflict.classId);
+        const conflictSubject = await Subject.findById(classConflict.subjectId);
+        return res.status(400).json({
+          success: false,
+          message: `Class \"${'${conflictClass?.className}'}\" already has \"${'${conflictSubject?.name}'}\" at ${'${classConflict.startTime}'} on ${'${day || timetable.day}'}. A class can only be assigned one period in this time slot.`
+        });
+      }
+
+      // Only block when the new teacher is already booked for this SAME class
+
+      // Only block when the new teacher is already booked for this SAME class
+      // at this time. Teaching different classes in the same period (combined
+      // classes) is allowed.
       const teacherConflict = await Timetable.findOne({
         teacherId,
         day: day || timetable.day,
@@ -381,18 +440,14 @@ router.put('/timetable/:id', async (req, res) => {
 
       if (teacherConflict) {
         const conflictClass = await SchoolClass.findById(teacherConflict.classId);
-        // If it's the SAME class, allow it
         if (conflictClass && conflictClass._id.toString() === (classId || timetable.classId).toString()) {
-          // Same class, different subject - allowed
-          console.log('✅ Same class, different subject - ALLOWED');
-        } else {
           return res.status(400).json({
             success: false,
-            message: `Teacher "${teacher.name}" is already assigned to "${conflictClass?.className || 'another class'}" at this time on ${day || timetable.day}`
+            message: `Teacher "${teacher.name}" is already assigned to "${conflictClass?.className || 'this class'}" at this time on ${day || timetable.day}`
           });
         }
+        // Different class at the same time - allowed (combined classes).
       }
-
       timetable.teacherId = teacherId;
     }
 
@@ -448,7 +503,7 @@ router.put('/timetable/:id', async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({
         success: false,
-        message: 'Teacher conflict: This teacher already has a period at this time in another class'
+        message: 'Teacher conflict: This teacher is already booked for this class at this time'
       });
     }
 
