@@ -12,6 +12,12 @@ const TimetableSchema = new mongoose.Schema({
     ref: 'SchoolClass',
     required: true
   },
+  section: {
+    type: String,
+    enum: ['englophone'],
+    default: 'englophone',
+    trim: true
+  },
   subjectId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Subject',
@@ -119,6 +125,7 @@ TimetableSchema.index(
 TimetableSchema.index(
   { teacherId: 1, day: 1 }
 );
+TimetableSchema.index({ section: 1 });
 
 // ============================================
 // Pre-save middleware

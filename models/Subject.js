@@ -18,6 +18,13 @@ const SubjectSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    section: {
+        type: String,
+        enum: ["englophone"],
+        default: "englophone",
+        required: true,
+        trim: true
+    },
     classIds: {
         type: [String],
         default: []
@@ -41,6 +48,8 @@ const SubjectSchema = new mongoose.Schema({
 
 // Record deletions for the offline/online sync
 SubjectSchema.plugin(syncTombstonePlugin);
+
+SubjectSchema.index({ section: 1 });
 
 const Subject = mongoose.model("Subject", SubjectSchema)
 

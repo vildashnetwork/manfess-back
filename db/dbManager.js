@@ -13,7 +13,12 @@ import { execFile } from "child_process";
 import { runSync } from "./syncService.js";
 
 const ONLINE_URI = process.env.MONGOURI;
-const OFFLINE_URI = process.env.MONGOURIOFFLINE || 'mongodb://127.0.0.1:27017/MANFESS_OFFLINE';
+const OFFLINE_URI = process.env.MONGOURIOFFLINE || 'mongodb://127.0.0.1:27017/DEMO_OFFLINE';
+const OFFLINE_DB_ENABLED = String(
+    process.env.OFFLINE_DB_ENABLED ?? (process.env.RENDER ? 'false' : 'true')
+).trim().toLowerCase() === 'true';
+const CONFIGURED_DB_MODE = String(process.env.DB_MODE || '').trim().toLowerCase();
+const PREFER_OFFLINE = CONFIGURED_DB_MODE === 'offline';
 
 const ONLINE_CONNECT_OPTIONS = {
     serverSelectionTimeoutMS: 10000,
@@ -59,7 +64,7 @@ const osResolveSrv = (srvName) => {
 };
 
 // Convert a mongodb+srv:// URI into a standard mongodb:// seed-list URI
-const srvToStandardUri = async (srvUri) => {
+export const srvToStandardUri = async (srvUri) => {
     const match = srvUri.match(/^mongodb\+srv:\/\/([^:/?#]+)(?::([^@/#]*))?@([^/?#]+)(\/[^?#]*)?(\?.*)?$/);
     if (!match) throw new Error('Could not parse the mongodb+srv:// connection string');
     const [, user, password, host, dbPath = '', query = ''] = match;
@@ -137,7 +142,7 @@ class DbManager {
         this.syncing = false;
         this.onlineHosts = [];         // resolved Atlas hosts for reachability probes
         this.standardUriCache = null;  // cached SRV -> standard URI conversion
-        this.offlineAvailable = true;
+        this.offlineAvailable = OFFLINE_DB_ENABLED;
         this.offlineFailures = 0;
         this.monitorTimer = null;
         this.lastSync = null;          // last successful sync result
@@ -174,6 +179,9 @@ class DbManager {
     }
 
     async connectOffline() {
+        if (!this.offlineAvailable) {
+            throw new Error('Offline MongoDB is disabled. Set OFFLINE_DB_ENABLED=true to enable it.');
+        }
         await mongoose.connect(OFFLINE_URI, OFFLINE_CONNECT_OPTIONS);
     }
 
@@ -215,8 +223,20 @@ class DbManager {
     // ---- lifecycle -----------------------------------------------------------
 
     async init() {
+        if (PREFER_OFFLINE) {
+            console.log('🏠 Local development database mode: connecting directly to the offline MongoDB mirror...');
+            await this.connectOffline();
+            this.mode = 'offline';
+            console.log('📴 Mode: OFFLINE (local MongoDB)');
+            return this.getStatus();
+        }
+
         if (!ONLINE_URI) {
             throw new Error('MONGOURI environment variable is not defined. Add it to your .env file.');
+        }
+
+        if (!this.offlineAvailable) {
+            console.log('☁️ Offline MongoDB mirror disabled; running online-only.');
         }
 
         // With a local fallback available we fail over fast.
@@ -251,8 +271,9 @@ class DbManager {
 
         this.startMonitor();
 
-        // Refresh the local mirror right away (also pushes offline changes up)
-        if (this.mode === 'online') await this.runSyncCycle('startup');
+        // Start the initial mirror refresh without delaying the API listener.
+        // The sync remains serialized with periodic and failover sync cycles.
+        if (this.mode === 'online' && this.offlineAvailable) void this.runSyncCycle('startup');
 
         return this.getStatus();
     }
@@ -274,8 +295,7 @@ class DbManager {
             this.lastSyncError = err.message;
             console.error('❌ Sync failed:', err.message);
             if (/ECONNREFUSED|ENOTFOUND|ServerSelection/i.test(err.message || '')) {
-                this.offlineAvailable = false;
-                console.warn('⚠️ Local MongoDB unreachable — sync disabled (online-only mode).');
+                console.warn('⚠️ Local MongoDB temporarily unreachable — sync will retry on the next cycle.');
             }
             return null;
         } finally {
@@ -287,6 +307,10 @@ class DbManager {
     }
 
     async switchToOffline() {
+        if (!this.offlineAvailable) {
+            console.warn('⚠️ Offline mode is disabled; staying on the online database.');
+            return;
+        }
         if (this.switching) return;
         this.switching = true;
         try {
@@ -381,7 +405,7 @@ class DbManager {
             } else {
                 this.offlineFailures += 1;
                 console.warn(`⚠️ Online database unreachable (${this.offlineFailures}/2)...`);
-                if (this.offlineFailures >= 2) await this.switchToOffline();
+                if (this.offlineFailures >= 2 && this.offlineAvailable) await this.switchToOffline();
             }
         } else if (this.mode === 'offline') {
             if (reachable) await this.switchToOnline();

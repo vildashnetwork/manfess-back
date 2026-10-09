@@ -8,12 +8,14 @@
 import Mark from "../models/Mark.js";
 import SchoolClass from "../models/SchoolClass.js";
 import Student from "../models/Students.js";
+import StudentAttendance from "../models/StudentAttendance.js";
 import Subject from "../models/Subject.js";
 import TeacherAttendance from "../models/TeacherAttendance.js";
 import TeacherSalary from "../models/TeacherSalary.js";
 import Timetable from "../models/Timetable.js";
 import User from "../models/User.js";
-import { TOMBSTONE_COLLECTION } from "./syncPlugin.js";
+// NOTE: TOMBSTONE_COLLECTION import removed — deletion propagation is disabled
+// (see applyDeletions below); sync only copies creates/updates now.
 
 export const STATE_COLLECTION = 'sync_states';
 const OVERLAP_MS = 2000; // re-check window so boundary updates are never missed
@@ -21,7 +23,7 @@ const BATCH_SIZE = 500;  // documents per bulk write
 
 // All collections that participate in the sync
 export const SYNC_MODELS = [
-    Mark, SchoolClass, Student, Subject, TeacherAttendance, TeacherSalary, Timetable, User
+    Mark, SchoolClass, Student, StudentAttendance, Subject, TeacherAttendance, TeacherSalary, Timetable, User
 ].map((model) => ({ name: model.modelName, collection: model.collection.name }));
 
 const getTime = (value) => (value ? new Date(value).getTime() : 0);
@@ -51,33 +53,38 @@ const upsertDocs = async (targetCol, docs) => {
     return written;
 };
 
-// Read the documents changed since `since` (everything when null = first sync)
-const readChanged = (col, since) => {
+// Stream changed documents in bounded batches so a first sync of large
+// collections does not load the whole collection into server memory.
+const syncChangedDocs = async (sourceCol, targetCol, since) => {
     const filter = since ? { updatedAt: { $gt: new Date(since.getTime() - OVERLAP_MS) } } : {};
-    return col.find(filter).toArray();
+    const cursor = sourceCol.find(filter).batchSize(BATCH_SIZE);
+    let batch = [];
+    let written = 0;
+
+    try {
+        for await (const doc of cursor) {
+            batch.push(doc);
+            if (batch.length >= BATCH_SIZE) {
+                written += await upsertDocs(targetCol, batch);
+                batch = [];
+            }
+        }
+        if (batch.length) written += await upsertDocs(targetCol, batch);
+    } finally {
+        await cursor.close().catch(() => { });
+    }
+
+    return written;
 };
 
 // Replay tombstones recorded on `fromConn` against `toConn`
-const applyDeletions = async (fromConn, toConn, collection, modelName) => {
-    const tombCol = fromConn.db.collection(TOMBSTONE_COLLECTION);
-    const tombstones = await tombCol.find({ model: modelName }).toArray();
-    if (!tombstones.length) return 0;
-
-    const targetCol = toConn.db.collection(collection);
-    let applied = 0;
-    for (const tomb of tombstones) {
-        const existing = await targetCol.findOne({ _id: tomb.docId }, { projection: { updatedAt: 1 } });
-        if (existing && getTime(existing.updatedAt) > getTime(tomb.deletedAt)) {
-            // The target version is newer than the delete -> keep it and drop
-            // the tombstone (the newer version is pulled back to the source).
-            await tombCol.deleteOne({ _id: tomb._id });
-            continue;
-        }
-        await targetCol.deleteOne({ _id: tomb.docId });
-        await tombCol.deleteOne({ _id: tomb._id });
-        applied += 1;
-    }
-    return applied;
+// DELETION PROPAGATION DISABLED (2026-10-07): the offline/online sync used to
+// replay every recorded deletion onto the mirror database, so a single delete
+// (or a stale tombstone) could wipe the same collection on the other side on
+// every automatic switch. Deletions are now local-only; this function is kept
+// as a no-op so existing call sites keep working.
+const applyDeletions = async (/* fromConn, toConn, collection, modelName */) => {
+    return 0;
 };
 
 // Sync one collection between the active connection and the other side
@@ -85,8 +92,9 @@ const syncOneCollection = async (activeConn, otherConn, { name, collection }, sy
     const activeCol = activeConn.db.collection(collection);
     const otherCol = otherConn.db.collection(collection);
     const stateCol = activeConn.db.collection(STATE_COLLECTION);
+    const stateId = `${otherConn.name}:${collection}`;
 
-    const state = await stateCol.findOne({ _id: collection });
+    const state = await stateCol.findOne({ _id: stateId });
     const since = state && state.lastSyncAt ? new Date(state.lastSyncAt) : null;
 
     const result = { collection, model: name, pushed: 0, pulled: 0, deletionsApplied: 0 };
@@ -97,15 +105,15 @@ const syncOneCollection = async (activeConn, otherConn, { name, collection }, sy
     result.deletionsApplied += await applyDeletions(activeConn, otherConn, collection, name);
 
     // 3) push changes made on this side
-    result.pushed = await upsertDocs(otherCol, await readChanged(activeCol, since));
+    result.pushed = await syncChangedDocs(activeCol, otherCol, since);
 
     // 4) pull changes made on the other side
-    result.pulled = await upsertDocs(activeCol, await readChanged(otherCol, since));
+    result.pulled = await syncChangedDocs(otherCol, activeCol, since);
 
     // 5) remember progress (only saved for collections that completed)
     await stateCol.updateOne(
-        { _id: collection },
-        { $set: { model: name, lastSyncAt: syncStart, lastSyncFinishedAt: new Date() } },
+        { _id: stateId },
+        { $set: { model: name, collection, mirrorDatabase: otherConn.name, lastSyncAt: syncStart, lastSyncFinishedAt: new Date() } },
         { upsert: true }
     );
 

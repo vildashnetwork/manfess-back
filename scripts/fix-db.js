@@ -136,6 +136,158 @@ async function main() {
   await users.updateOne({ name: 'Mr Nkimi' }, { $set: { classIds: [...new Set([...nkimiCls, ...econAlevelCls])] } });
   console.log('FIXED Mr Nkimi: added Alevel for Economics');
 
+  // FIX 5: Move ALL Madam Marvis's Tuesday periods to Friday
+  const marvis = await users.findOne({ name: 'Madam Marvis' });
+  if (marvis) {
+    const timetables = mongoose.connection.db.collection('timetables');
+    const marvisTuesdayEntries = await timetables.find({ teacherId: marvis._id, day: 'Tuesday' }).toArray();
+    console.log(`Madam Marvis has ${marvisTuesdayEntries.length} Tuesday periods`);
+
+    const marvisFridayEntries = await timetables.find({ teacherId: marvis._id, day: 'Friday' }).toArray();
+    const fridayUsedPeriods = new Set(marvisFridayEntries.map(e => e.periodNumber));
+
+    let movedCount = 0;
+    for (const entry of marvisTuesdayEntries) {
+      let placed = false;
+      for (let p = 1; p <= 6; p++) {
+        if (fridayUsedPeriods.has(p)) continue;
+        const classConflict = await timetables.findOne({
+          classId: entry.classId, day: 'Friday', periodNumber: p, _id: { $ne: entry._id }
+        });
+        if (classConflict) continue;
+        await timetables.updateOne({ _id: entry._id }, { $set: { day: 'Friday', periodNumber: p } });
+        fridayUsedPeriods.add(p);
+        console.log(`  Moved Tue period ${entry.periodNumber} -> Fri period ${p}`);
+        movedCount++;
+        placed = true;
+        break;
+      }
+      if (!placed) console.log(`  WARNING: No free Friday slot for Tue period ${entry.periodNumber}`);
+    }
+    console.log(`Moved ${movedCount}/${marvisTuesdayEntries.length} Tuesday periods to Friday`);
+  }
+
+  await mongoose.disconnect();
+  console.log('DONE');
+}
+
+main().catch(e => { console.error(e); process.exit(1); });
+  // FIX 5: Move Madam Marvis's Tuesday period to Friday
+  const marvis = await users.findOne({ name: 'Madam Marvis' });
+  if (marvis) {
+    const timetables = mongoose.connection.db.collection('timetables');
+    const marvisEntries = await timetables.find({ teacherId: marvis._id }).toArray();
+    console.log(`Madam Marvis has ${marvisEntries.length} periods`);
+
+    // Find her Tuesday period
+    const tuesdayEntry = marvisEntries.find(e => e.day === 'Tuesday');
+    if (tuesdayEntry) {
+      console.log(`Found Tuesday period: ${tuesdayEntry.day} ${tuesdayEntry.startTime}-${tuesdayEntry.endTime} subject=${tuesdayEntry.subjectId}`);
+      // Find a free Friday slot
+      const fridayEntries = await timetables.find({
+        teacherId: marvis._id,
+        day: 'Friday'
+      }).toArray();
+      const fridayUsedPeriods = new Set(fridayEntries.map(e => e.periodNumber));
+
+      // Try to find a free period on Friday (1-6)
+      let freePeriod = // Fix database mappings directly
+import 'dotenv/config';
+import mongoose from 'mongoose';
+import dns from 'node:dns';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+const ObjectId = mongoose.Types.ObjectId;
+
+const srvToStandardUri = async (srvUri) => {
+  const match = srvUri.match(/^mongodb\+srv:\/\/([^:/?#]+)(?::([^@/#]*))?@([^/?#]+)(\/[^?#]*)?(\?.*)?$/);
+  if (!match) return srvUri;
+  const [, user, password = '', host, dbPath = '', query = ''] = match;
+  let records;
+  try {
+    records = await dns.promises.resolveSrv(`_mongodb._tcp.${host}`);
+  } catch {
+    const cmd = `Resolve-DnsName -Type SRV "_mongodb._tcp.${host}" -ErrorAction Stop | Select-Object NameTarget,Port | ConvertTo-Json -Compress`;
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { windowsHide: true, timeout: 15000 });
+    const parsed = JSON.parse(stdout.trim());
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    records = list.filter((r) => r && r.NameTarget && r.Port).map((r) => ({ name: String(r.NameTarget).replace(/\.$/, ''), port: Number(r.Port) }));
+  }
+  const hosts = records.map((r) => `${r.name}:${r.port}`).join(',');
+  const params = new URLSearchParams(query ? query.slice(1) : '');
+  if (!params.has('tls') && !params.has('ssl')) params.set('tls', 'true');
+  if (!params.has('authSource')) params.set('authSource', 'admin');
+  return `mongodb://${user}:${password}@${hosts}${dbPath || '/'}?${params.toString()}`;
+};
+
+async function main() {
+  console.log('Resolving Atlas connection...');
+  const uri = await srvToStandardUri(process.env.MONGOURI);
+  await mongoose.connect(uri);
+  console.log('Connected to Atlas');
+
+  const users = mongoose.connection.db.collection('users');
+  const timetables = mongoose.connection.db.collection('timetables');
+
+  // Move ALL Madam Marvis's Tuesday periods to Friday
+  const marvis = await users.findOne({ name: 'Madam Marvis' });
+  if (marvis) {
+    const marvisTuesdayEntries = await timetables.find({ teacherId: marvis._id, day: 'Tuesday' }).toArray();
+    console.log(`Madam Marvis has ${marvisTuesdayEntries.length} Tuesday periods`);
+
+    const marvisFridayEntries = await timetables.find({ teacherId: marvis._id, day: 'Friday' }).toArray();
+    const fridayUsedPeriods = new Set(marvisFridayEntries.map(e => e.periodNumber));
+
+    let movedCount = 0;
+    for (const entry of marvisTuesdayEntries) {
+      let placed = false;
+      for (let p = 1; p <= 6; p++) {
+        if (fridayUsedPeriods.has(p)) continue;
+        const classConflict = await timetables.findOne({
+          classId: entry.classId, day: 'Friday', periodNumber: p, _id: { $ne: entry._id }
+        });
+        if (classConflict) continue;
+        await timetables.updateOne({ _id: entry._id }, { $set: { day: 'Friday', periodNumber: p } });
+        fridayUsedPeriods.add(p);
+        console.log(`  Moved Tue period ${entry.periodNumber} -> Fri period ${p}`);
+        movedCount++;
+        placed = true;
+        break;
+      }
+      if (!placed) console.log(`  WARNING: No free Friday slot for Tue period ${entry.periodNumber}`);
+    }
+    console.log(`Moved ${movedCount}/${marvisTuesdayEntries.length} Tuesday periods to Friday`);
+  }
+
+  await mongoose.disconnect();
+  console.log('DONE');
+}
+
+main().catch(e => { console.error(e); process.exit(1); });;
+      for (let p = 1; p <= 6; p++) {
+        if (!fridayUsedPeriods.has(p)) {
+          freePeriod = p;
+          break;
+        }
+      }
+
+      if (freePeriod) {
+        console.log(`Moving to Friday period ${freePeriod}`);
+        await timetables.updateOne(
+          { _id: tuesdayEntry._id },
+          { $set: { day: 'Friday', periodNumber: freePeriod } }
+        );
+        console.log(`DONE - moved Madam Marvis's Tuesday period to Friday`);
+      } else {
+        console.log('No free Friday period found');
+      }
+    } else {
+      console.log('No Tuesday period found for Madam Marvis');
+    }
+  }
+
   await mongoose.disconnect();
   console.log('DONE');
 }

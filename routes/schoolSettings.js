@@ -1,6 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import SchoolSettings from "../models/SchoolSettings.js";
+import { normalizeSchoolSection } from "../utils/schoolSection.js";
 
 const router = express.Router();
 
@@ -11,8 +12,9 @@ router.get("/settings", async (req, res) => {
     const academicYear =
       req.query.academicYear ||
       `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
+    const section = normalizeSchoolSection(req.query.section || "englophone", "englophone");
 
-    let settings = await SchoolSettings.findOne({ academicYear });
+    let settings = await SchoolSettings.findOne({ academicYear, section });
 
     if (!settings) {
       // Return sensible defaults so the UI is never empty.
@@ -24,7 +26,9 @@ router.get("/settings", async (req, res) => {
         periodDurationMinutes: 45,
         schoolDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
         academicYear,
+        section,
         periodsPerDay: 6,
+        teacherPaymentMode: "hourly",
       };
     }
 
@@ -53,11 +57,14 @@ router.post("/settings", async (req, res) => {
       periodDurationMinutes,
       schoolDays,
       periodsPerDay,
+      teacherPaymentMode,
+      section,
     } = req.body;
 
     const academicYear =
       req.body.academicYear ||
       `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
+    const activeSection = normalizeSchoolSection(section || "englophone", "englophone");
 
     // Basic validation
     const timeRe = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/;
@@ -110,6 +117,13 @@ router.post("/settings", async (req, res) => {
       });
     }
 
+    if (teacherPaymentMode && !["hourly", "monthly"].includes(teacherPaymentMode)) {
+      return res.status(400).json({
+        success: false,
+        message: "Teacher payment mode must be hourly or monthly",
+      });
+    }
+
     const updates = {
       schoolStartTime,
       schoolEndTime,
@@ -124,11 +138,13 @@ router.post("/settings", async (req, res) => {
         "Friday",
       ],
       periodsPerDay: Number(periodsPerDay) || 6,
+      section: activeSection,
+      ...(teacherPaymentMode ? { teacherPaymentMode } : {}),
     };
 
-    // Upsert by academic year (unique index enforces one settings document/year).
+    // Keep one settings document per academic year.
     const settings = await SchoolSettings.findOneAndUpdate(
-      { academicYear },
+      { academicYear, section: activeSection },
       updates,
       { new: true, upsert: true, runValidators: true }
     );

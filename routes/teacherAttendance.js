@@ -10,12 +10,13 @@ import User from '../models/User.js';
 // Get all attendance records - GET /api/attendance
 router.get('/attendance', async (req, res) => {
   try {
-    const { teacherId, date, status, month, year } = req.query;
-    
+    const { teacherId, date, status, month, year, section } = req.query;
+
     let filter = {};
+    if (section) filter.section = section;
     if (teacherId) filter.teacherId = teacherId;
     if (status) filter.status = status;
-    
+
     if (date) {
       const startDate = new Date(date);
       startDate.setHours(0, 0, 0, 0);
@@ -23,17 +24,17 @@ router.get('/attendance', async (req, res) => {
       endDate.setHours(23, 59, 59, 999);
       filter.date = { $gte: startDate, $lte: endDate };
     }
-    
+
     if (month && year) {
       const startDate = new Date(year, month - 1, 1);
       const endDate = new Date(year, month, 0, 23, 59, 59, 999);
       filter.date = { $gte: startDate, $lte: endDate };
     }
-    
+
     const attendance = await TeacherAttendance.find(filter)
       .populate('teacherId', 'name email qualification')
       .sort({ date: -1 });
-    
+
     res.status(200).json({
       success: true,
       data: attendance
@@ -52,10 +53,11 @@ router.get('/attendance', async (req, res) => {
 router.get('/attendance/teacher/:teacherId', async (req, res) => {
   try {
     const { teacherId } = req.params;
-    const { month, year, startDate, endDate } = req.query;
-    
+    const { month, year, startDate, endDate, section } = req.query;
+
     let filter = { teacherId };
-    
+    if (section) filter.section = section;
+
     if (month && year) {
       const start = new Date(year, month - 1, 1);
       const end = new Date(year, month, 0, 23, 59, 59, 999);
@@ -66,10 +68,10 @@ router.get('/attendance/teacher/:teacherId', async (req, res) => {
         $lte: new Date(endDate)
       };
     }
-    
+
     const attendance = await TeacherAttendance.find(filter)
       .sort({ date: -1 });
-    
+
     // Calculate statistics
     const stats = {
       present: attendance.filter(a => a.status === 'present').length,
@@ -78,7 +80,7 @@ router.get('/attendance/teacher/:teacherId', async (req, res) => {
       excused: attendance.filter(a => a.status === 'excused').length,
       total: attendance.length
     };
-    
+
     res.status(200).json({
       success: true,
       data: {
@@ -99,15 +101,15 @@ router.get('/attendance/teacher/:teacherId', async (req, res) => {
 // Get attendance summary for all teachers - GET /api/attendance/summary
 router.get('/attendance/summary', async (req, res) => {
   try {
-    const { month, year } = req.query;
-    
-    let dateFilter = {};
+    const { month, year, section } = req.query;
+
+    let dateFilter = section ? { section } : {};
     if (month && year) {
       const start = new Date(year, month - 1, 1);
       const end = new Date(year, month, 0, 23, 59, 59, 999);
-      dateFilter = { date: { $gte: start, $lte: end } };
+      dateFilter = { ...dateFilter, date: { $gte: start, $lte: end } };
     }
-    
+
     const summary = await TeacherAttendance.aggregate([
       { $match: dateFilter },
       {
@@ -155,7 +157,7 @@ router.get('/attendance/summary', async (req, res) => {
         }
       }
     ]);
-    
+
     res.status(200).json({
       success: true,
       data: summary
@@ -181,14 +183,14 @@ router.post('/attendance', async (req, res) => {
       teacherId, date, checkIn, checkOut, status,
       hoursWorked, periodsTaught, notes, academicYear, term
     } = req.body;
-    
+
     if (!teacherId) {
       return res.status(400).json({
         success: false,
         message: 'Teacher ID is required'
       });
     }
-    
+
     // Check if teacher exists
     const teacher = await User.findById(teacherId);
     if (!teacher) {
@@ -197,13 +199,13 @@ router.post('/attendance', async (req, res) => {
         message: 'Teacher not found'
       });
     }
-    
+
     // Check for existing attendance
     const existing = await TeacherAttendance.findOne({
       teacherId,
       date: date ? new Date(date) : new Date()
     });
-    
+
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -211,7 +213,7 @@ router.post('/attendance', async (req, res) => {
         data: existing
       });
     }
-    
+
     const attendance = new TeacherAttendance({
       teacherId,
       date: date || new Date(),
@@ -222,14 +224,15 @@ router.post('/attendance', async (req, res) => {
       periodsTaught: periodsTaught || 0,
       notes,
       academicYear: academicYear || '2024-2025',
+      section: 'englophone',
       term: term || 'first'
     });
-    
+
     await attendance.save();
-    
+
     const populated = await TeacherAttendance.findById(attendance._id)
       .populate('teacherId', 'name email');
-    
+
     res.status(201).json({
       success: true,
       data: populated,
@@ -249,29 +252,29 @@ router.post('/attendance', async (req, res) => {
 router.post('/attendance/bulk', async (req, res) => {
   try {
     const { records } = req.body;
-    
+
     if (!records || !Array.isArray(records) || records.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'Please provide an array of attendance records'
       });
     }
-    
+
     const created = [];
     const errors = [];
-    
+
     for (const record of records) {
       try {
         const {
           teacherId, date, checkIn, checkOut, status,
           hoursWorked, periodsTaught, notes
         } = record;
-        
+
         if (!teacherId) {
           errors.push({ record, error: 'Teacher ID is required' });
           continue;
         }
-        
+
         const attendance = new TeacherAttendance({
           teacherId,
           date: date || new Date(),
@@ -282,16 +285,17 @@ router.post('/attendance/bulk', async (req, res) => {
           periodsTaught: periodsTaught || 0,
           notes,
           academicYear: record.academicYear || '2024-2025',
+          section: 'englophone',
           term: record.term || 'first'
         });
-        
+
         await attendance.save();
         created.push(attendance);
       } catch (error) {
         errors.push({ record, error: error.message });
       }
     }
-    
+
     res.status(201).json({
       success: true,
       data: {
@@ -320,7 +324,7 @@ router.put('/attendance/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
-    
+
     const attendance = await TeacherAttendance.findById(id);
     if (!attendance) {
       return res.status(404).json({
@@ -328,14 +332,15 @@ router.put('/attendance/:id', async (req, res) => {
         message: 'Attendance record not found'
       });
     }
-    
+
     Object.assign(attendance, updates);
+    attendance.section = 'englophone';
     attendance.updatedAt = new Date();
     await attendance.save();
-    
+
     const populated = await TeacherAttendance.findById(id)
       .populate('teacherId', 'name email');
-    
+
     res.status(200).json({
       success: true,
       data: populated,
@@ -359,7 +364,7 @@ router.put('/attendance/:id', async (req, res) => {
 router.delete('/attendance/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     const attendance = await TeacherAttendance.findByIdAndDelete(id);
     if (!attendance) {
       return res.status(404).json({
@@ -367,7 +372,7 @@ router.delete('/attendance/:id', async (req, res) => {
         message: 'Attendance record not found'
       });
     }
-    
+
     res.status(200).json({
       success: true,
       message: 'Attendance record deleted successfully'

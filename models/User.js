@@ -36,9 +36,21 @@ const userschema = new mongoose.Schema({
         type: [String],
         default: []
     },
+    section: {
+        type: String,
+        enum: ["englophone"],
+        default: "englophone",
+        required: true,
+        trim: true
+    },
     isPermanent: {
         type: Boolean,
         default: false
+    },
+    monthlySalary: {
+        type: Number,
+        min: [0, "Monthly salary cannot be negative"],
+        default: 0
     },
     availableDays: {
         type: [String],
@@ -53,6 +65,8 @@ const userschema = new mongoose.Schema({
 
 // Record deletions for the offline/online sync
 userschema.plugin(syncTombstonePlugin);
+
+userschema.index({ section: 1 });
 
 const User = mongoose.model("User", userschema);
 

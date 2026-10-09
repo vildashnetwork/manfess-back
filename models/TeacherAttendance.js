@@ -7,6 +7,12 @@ const TeacherAttendanceSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  section: {
+    type: String,
+    enum: ['englophone'],
+    default: 'englophone',
+    trim: true
+  },
   date: {
     type: Date,
     required: true,
@@ -15,7 +21,7 @@ const TeacherAttendanceSchema = new mongoose.Schema({
   checkIn: {
     type: String,
     validate: {
-      validator: function(v) {
+      validator: function (v) {
         return /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(v);
       },
       message: props => `${props.value} is not a valid time format!`
@@ -24,7 +30,7 @@ const TeacherAttendanceSchema = new mongoose.Schema({
   checkOut: {
     type: String,
     validate: {
-      validator: function(v) {
+      validator: function (v) {
         return /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/.test(v);
       },
       message: props => `${props.value} is not a valid time format!`
@@ -77,6 +83,7 @@ TeacherAttendanceSchema.index(
   { teacherId: 1, date: 1 },
   { unique: true }
 );
+TeacherAttendanceSchema.index({ section: 1 });
 
 // Index for faster queries
 TeacherAttendanceSchema.index({ teacherId: 1, date: -1 });

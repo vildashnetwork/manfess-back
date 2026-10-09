@@ -76,19 +76,30 @@ const schoolSettingsSchema = new mongoose.Schema({
         `${props.value} is not a valid academic year format. Use YYYY-YYYY`,
     },
   },
+  section: {
+    type: String,
+    enum: ["englophone"],
+    default: "englophone",
+    trim: true,
+  },
   periodsPerDay: {
     type: Number,
     min: [1, "Must have at least 1 period"],
     max: [12, "Cannot exceed 12 periods"],
     default: 6,
   },
+  teacherPaymentMode: {
+    type: String,
+    enum: ["hourly", "monthly"],
+    default: "hourly",
+  },
 },
-{
-  timestamps: true,
-});
+  {
+    timestamps: true,
+  });
 
-// Ensure only one settings document per academic year
-schoolSettingsSchema.index({ academicYear: 1 }, { unique: true });
+// Keep one settings document per stream and academic year
+schoolSettingsSchema.index({ academicYear: 1, section: 1 }, { unique: true });
 
 const SchoolSettings = mongoose.model("SchoolSettings", schoolSettingsSchema);
 

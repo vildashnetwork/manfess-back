@@ -12,6 +12,7 @@
   "type": "module",
   "dependencies": {
     "bonjour": "^3.5.1",
+    "cloudinary": "^2.11.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "env": "^0.0.2",

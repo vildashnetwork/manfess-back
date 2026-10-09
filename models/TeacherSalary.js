@@ -7,11 +7,18 @@ const TeacherSalarySchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  section: {
+    type: String,
+    enum: ['englophone'],
+    default: 'englophone',
+    required: true,
+    trim: true
+  },
   month: {
     type: String,
     required: true,
-    enum: ['January', 'February', 'March', 'April', 'May', 'June', 
-            'July', 'August', 'September', 'October', 'November', 'December']
+    enum: ['January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December']
   },
   year: {
     type: String,
@@ -41,6 +48,24 @@ const TeacherSalarySchema = new mongoose.Schema({
       default: 700
     }
   },
+  paymentMode: {
+    type: String,
+    enum: ['hourly', 'monthly'],
+    default: 'hourly'
+  },
+  monthlyAmount: {
+    type: Number,
+    min: 0,
+    default: 0
+  },
+  classBreakdown: [{
+    _id: false,
+    classId: String,
+    className: String,
+    periods: Number,
+    ratePerPeriod: Number,
+    amount: Number
+  }],
   grossSalary: {
     type: Number,
     required: true,
@@ -120,9 +145,10 @@ TeacherSalarySchema.index(
 // Index for faster queries
 TeacherSalarySchema.index({ teacherId: 1, year: 1 });
 TeacherSalarySchema.index({ status: 1 });
+TeacherSalarySchema.index({ section: 1, academicYear: 1, term: 1 });
 
 // Pre-save hook to calculate net salary
-TeacherSalarySchema.pre('save', function(next) {
+TeacherSalarySchema.pre('save', function (next) {
   this.netSalary = this.grossSalary - this.deductions.total;
   next();
 });

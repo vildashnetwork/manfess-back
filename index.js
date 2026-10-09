@@ -7,6 +7,7 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import { dbManager } from "./db/dbManager.js";
+import { localStudentUploadsPath } from "./services/cloudinaryStudentPhotos.js";
 
 // Import routes
 import marks from "./routes/mark.js";
@@ -15,6 +16,7 @@ import student from "./routes/student.js";
 import user from "./routes/user.js";
 import subject from "./routes/subject.js";
 import timetableRoutes from './routes/timetable.js';
+import studentAttendanceRoutes from './routes/studentAttendance.js';
 import teacherAttendanceRoutes from './routes/teacherAttendance.js';
 import teacherSalaryRoutes from './routes/teacherSalary.js';
 import schoolSettings from "./routes/schoolSettings.js";
@@ -25,8 +27,8 @@ const bonjour = Bonjour();
 
 // ==================== CONFIGURATION ====================
 const PORT = process.env.PORT || 5000;
-const SERVICE_NAME = process.env.SERVICE_NAME || 'Manfess';
-const HOSTNAME = process.env.HOSTNAME || 'manfess';
+const SERVICE_NAME = process.env.SERVICE_NAME || 'DEMO';
+const HOSTNAME = process.env.HOSTNAME || 'DEMO';
 const MONGOURL = process.env.MONGOURI;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
@@ -50,6 +52,7 @@ function getLocalIP() {
 // ==================== MIDDLEWARE ====================
 // JSON parsing with error handling
 app.use(express.json({
+    limit: "8mb",
     verify: (req, res, buf) => {
         try {
             JSON.parse(buf);
@@ -77,9 +80,8 @@ app.use(morgan(":method :url :status :response-time ms - :res[content-length]"))
 
 // CORS middleware
 const allowedOrigins = [
-    "https://manfess-brand.vercel.app",
-    "https://manfess.vildashnetwork.com",
     "http://localhost:5173",
+    "https://demoschool.vildashnetwork.com",
     "http://localhost:3000",
     process.env.FRONTEND_URL
 ].filter(Boolean);
@@ -96,10 +98,12 @@ app.use(cors({
         }
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+    allowedHeaders: ["Content-Type", "Authorization", "Accept", "X-School-Section"],
     credentials: true,
     maxAge: 86400 // 24 hours
 }));
+
+app.use("/uploads/students", express.static(localStudentUploadsPath));
 
 // ==================== ROUTES ====================
 // Health check endpoint
@@ -138,8 +142,8 @@ app.get("/health", (req, res) => {
 // Manifest endpoint
 app.get("/manifest.json", (req, res) => {
     res.json({
-        name: 'manfess',
-        short_name: 'manfess',
+        name: 'BCHS DOUALA',
+        short_name: 'BCHS',
         description: "School Management System",
         start_url: "/",
         display: "standalone",
@@ -158,7 +162,7 @@ app.get("/manifest.json", (req, res) => {
 // Root endpoint
 app.get("/", (req, res) => {
     res.json({
-        message: "Welcome to Manfess API",
+        message: "Welcome to BCHS DOUALA API",
         version: "1.0.0",
         endpoints: {
             health: "/health",
@@ -205,6 +209,9 @@ app.use("/api", subject);
 app.use("/api", schoolSettings);
 
 app.use("/api", timetableRoutes);
+// Student attendance must be mounted before the staff register so that
+// /api/attendance/students/... is never captured by /api/attendance/:id
+app.use("/api", studentAttendanceRoutes);
 app.use("/api", teacherAttendanceRoutes);
 app.use("/api", teacherSalaryRoutes);
 // 404 handler for undefined routes
@@ -308,7 +315,7 @@ const startServer = async () => {
                         // Another instance/device already uses this name ->
                         // retry once with a unique name instead of crashing.
                         if (/already in use/i.test(error.message || '') && name === SERVICE_NAME) {
-                            try { service.stop(() => {}); } catch { /* ignore */ }
+                            try { service.stop(() => { }); } catch { /* ignore */ }
                             const uniqueName = `${SERVICE_NAME} (${process.pid})`;
                             console.log(`📡 Retrying mDNS advertisement as "${uniqueName}"...`);
                             advertise(uniqueName);

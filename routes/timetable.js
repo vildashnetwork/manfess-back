@@ -15,9 +15,9 @@ import { generateTimetableSchedule } from '../services/timetableScheduler.js';
 
 router.get('/timetable', async (req, res) => {
   try {
-    const { teacherId, classId, day, academicYear } = req.query;
+    const { teacherId, classId, day, academicYear, section } = req.query;
 
-    let filter = {};
+    let filter = section ? { section } : {};
     if (teacherId) filter.teacherId = teacherId;
     if (classId) filter.classId = classId;
     if (day) filter.day = day;
@@ -47,9 +47,10 @@ router.get('/timetable', async (req, res) => {
 router.get('/timetable/teacher/:teacherId', async (req, res) => {
   try {
     const { teacherId } = req.params;
-    const { day, academicYear } = req.query;
+    const { day, academicYear, section } = req.query;
 
     let filter = { teacherId, isActive: true };
+    if (section) filter.section = section;
     if (day) filter.day = day;
     if (academicYear) filter.academicYear = academicYear;
 
@@ -80,6 +81,7 @@ router.get('/timetable/teacher/:teacherId', async (req, res) => {
 router.post('/timetable', async (req, res) => {
   try {
     console.log('📥 Received POST request:', req.body);
+    const section = 'englophone';
 
     const {
       teacherId, classId, subjectId, day, startTime, endTime,
@@ -119,6 +121,10 @@ router.post('/timetable', async (req, res) => {
         success: false,
         message: 'Subject not found'
       });
+    }
+
+    if (teacher.section !== section || classExists.schoolSection !== section || subject.section !== section) {
+      return res.status(400).json({ success: false, message: 'Teacher, class, subject, and timetable section must match' });
     }
 
     // A class can only hold ONE period in a given time slot. If the same class
@@ -214,6 +220,7 @@ router.post('/timetable', async (req, res) => {
       teacherId,
       classId,
       subjectId,
+      section,
       day,
       startTime,
       endTime,
@@ -258,6 +265,7 @@ router.post('/timetable', async (req, res) => {
 // Bulk create timetable entries
 router.post('/timetable/bulk', async (req, res) => {
   try {
+    const activeSection = 'englophone';
     const { entries } = req.body;
 
     if (!entries || !Array.isArray(entries) || entries.length === 0) {
@@ -286,6 +294,15 @@ router.post('/timetable/bulk', async (req, res) => {
         const teacher = await User.findById(teacherId);
         if (!teacher) {
           errors.push({ entry, error: 'Teacher not found' });
+          continue;
+        }
+
+        const [schoolClass, subject] = await Promise.all([
+          SchoolClass.findById(classId),
+          Subject.findById(subjectId),
+        ]);
+        if (!schoolClass || !subject || teacher.section !== activeSection || schoolClass.schoolSection !== activeSection || subject.section !== activeSection) {
+          errors.push({ entry, error: 'Teacher, class, subject, and timetable section must match' });
           continue;
         }
 
@@ -329,6 +346,7 @@ router.post('/timetable/bulk', async (req, res) => {
           teacherId,
           classId,
           subjectId,
+          section: activeSection,
           day,
           startTime,
           endTime,
@@ -600,6 +618,7 @@ router.delete('/timetable/bulk', async (req, res) => {
 let generationInProgress = false;
 
 router.post('/timetable/generate', async (req, res) => {
+  const section = 'englophone';
   const academicYear = req.body.academicYear ||
     `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
   const repairMode = req.body.repair === true;
@@ -614,7 +633,7 @@ router.post('/timetable/generate', async (req, res) => {
 
   try {
     // 1. Fetch school settings
-    const settings = await SchoolSettings.findOne({ academicYear });
+    const settings = await SchoolSettings.findOne({ academicYear, section });
     if (!settings) {
       return res.status(400).json({
         success: false,
@@ -632,13 +651,14 @@ router.post('/timetable/generate', async (req, res) => {
 
     // 2. Fetch active classes, teachers and subjects
     const [classes, teachers, subjects] = await Promise.all([
-      SchoolClass.find({ isActive: true }).sort({ className: 1, department: 1, section: 1 }),
+      SchoolClass.find({ isActive: true, schoolSection: section }).sort({ className: 1, department: 1, section: 1 }),
       // Keep legacy teacher records (created before isActive was added) active.
       User.find({
         role: 'teacher',
+        section,
         $or: [{ isActive: true }, { isActive: { $exists: false } }],
       }),
-      Subject.find({}),
+      Subject.find({ section }),
     ]);
 
     // NOTE: Fix All Conflicts never changes a teacher's configured days.
@@ -660,17 +680,21 @@ router.post('/timetable/generate', async (req, res) => {
     const { entries: generatedEntries, conflicts, stats } = result;
 
     // 4. Clear existing entries for the academic year and persist new ones
-    await Timetable.deleteMany({ academicYear });
+    await Timetable.deleteMany({ academicYear, section });
 
     let savedEntries = [];
     if (generatedEntries.length > 0) {
-      savedEntries = await Timetable.insertMany(generatedEntries, { ordered: false });
+      savedEntries = await Timetable.insertMany(
+        generatedEntries.map((entry) => ({ ...entry, section })),
+        { ordered: false }
+      );
     }
 
     // One batched query instead of one findById + populate per entry (the old
     // N+1 pattern made generation take 20+ seconds on slow networks).
     const populatedDocs = await Timetable.find({
       _id: { $in: savedEntries.map((entry) => entry._id) },
+      section,
     })
       .populate('teacherId', 'name email')
       .populate('classId', 'className department')
@@ -692,10 +716,10 @@ router.post('/timetable/generate', async (req, res) => {
         conflicts,
         suggestions: conflicts.length > 0
           ? [
-              'Fix All Conflicts regenerates the week and fills every slot a qualified teacher can cover.',
-              'If a conflict still remains, add more active teachers or assign the missing subject/class mappings.',
-              'Reduce weekly periods or increase periods per day when total demand exceeds available slots.',
-            ]
+            'Fix All Conflicts regenerates the week and fills every slot a qualified teacher can cover.',
+            'If a conflict still remains, add more active teachers or assign the missing subject/class mappings.',
+            'Reduce weekly periods or increase periods per day when total demand exceeds available slots.',
+          ]
           : [],
         entries: populatedEntries,
       },

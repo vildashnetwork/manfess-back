@@ -4,13 +4,48 @@ import { syncTombstonePlugin } from "../db/syncPlugin.js";
 const schoolClassSchema = new mongoose.Schema({
     className: {
         type: String,
-        enum: ["Beginers1", "Beginers2", "Olevel 3", "Olevel 4", "Olevel 5", "Alevel", "Graduated"],
+        enum: [
+            "Beginers1",
+            "Beginers2",
+            "Olevel 3",
+            "Olevel 4",
+            "Olevel 5",
+            "Alevel",
+            "Graduated",
+            "Form 1",
+            "Form 2",
+            "Form 3",
+            "Form 4",
+            "Form 5",
+            "Lower 6th",
+            "Upper 6th",
+            "6ème",
+            "5ème",
+            "4ème",
+            "3ème",
+            "Seconde",
+            "Première",
+            "Terminale"
+        ],
         required: [true, "Class name is required"],
         trim: true
     },
     department: {
         type: String,
-        enum: ["General", "Science", "Arts", "Commercial"],
+        enum: [
+            "General",
+            "Science",
+            "Arts",
+            "Commercial",
+            "Electrical & Electronics",
+            "Civil Engineering & Woodwork",
+            "Mechanical",
+            "Home Economics & Social",
+            "Accounting",
+            "Marketing & Sales",
+            "Secretarial Administration & Communication",
+            "Home Economics & Social Care"
+        ],
         required: [true, "Department is required"],
         trim: true
     },
@@ -18,6 +53,12 @@ const schoolClassSchema = new mongoose.Schema({
         type: String,
         enum: ["1st Cycle", "2nd Cycle"],
         required: [true, "Cycle is required"],
+        trim: true
+    },
+    schoolSection: {
+        type: String,
+        enum: ["englophone"],
+        default: "englophone",
         trim: true
     },
     acedemicYear: {
@@ -44,6 +85,32 @@ const schoolClassSchema = new mongoose.Schema({
         type: Number,
         default: 50,
         min: [1, "Maximum students must be at least 1"]
+    },
+    ratePerPeriod: {
+        type: Number,
+        min: [0, "Rate per period cannot be negative"]
+    },
+    tuitionFee: {
+        type: Number,
+        required: [true, "Class tuition fee is required"],
+        min: [0, "Tuition fee cannot be negative"],
+        default: 0
+    },
+    tuitionInstallments: {
+        type: Number,
+        required: [true, "Tuition installment count is required"],
+        min: [1, "At least one tuition installment is required"],
+        max: [12, "Tuition cannot exceed 12 installments"],
+        default: 1
+    },
+    registrationFeeRequired: {
+        type: Boolean,
+        default: false
+    },
+    registrationFeeAmount: {
+        type: Number,
+        min: [0, "Registration fee cannot be negative"],
+        default: 0
     },
     isActive: {
         type: Boolean,
@@ -82,7 +149,14 @@ schoolClassSchema.virtual('level').get(function () {
         "Form 5": 5,
         "Lower 6th": 6,
         "Upper 6th": 7,
-        "Graduated": 8
+        "Graduated": 8,
+        "6ème": 1,
+        "5ème": 2,
+        "4ème": 3,
+        "3ème": 4,
+        "Seconde": 5,
+        "Première": 6,
+        "Terminale": 7
     };
     return levels[this.className] || 0;
 });
@@ -92,14 +166,15 @@ schoolClassSchema.index({ className: 1, department: 1, acedemicYear: 1 });
 schoolClassSchema.index({ classMasterId: 1 });
 schoolClassSchema.index({ acedemicYear: 1 });
 schoolClassSchema.index({ isActive: 1 });
+schoolClassSchema.index({ schoolSection: 1 });
 
 // ============ FIXED: Pre-save middleware ============
 // Removed the problematic next parameter - using async/await instead
 schoolClassSchema.pre('save', async function () {
     // Auto-set cycle based on className if not provided
     if (!this.cycle) {
-        const lowerClasses = ["Form 1", "Form 2", "Form 3", "Form 4"];
-        const upperClasses = ["Form 5", "Lower 6th", "Upper 6th"];
+        const lowerClasses = ["Form 1", "Form 2", "Form 3", "Form 4", "6ème", "5ème", "4ème", "3ème"];
+        const upperClasses = ["Form 5", "Lower 6th", "Upper 6th", "Seconde", "Première", "Terminale"];
 
         if (lowerClasses.includes(this.className)) {
             this.cycle = "1st Cycle";
