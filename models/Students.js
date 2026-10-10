@@ -162,8 +162,17 @@ studentschema.virtual("admissionNumber")
         if (value) this.matricule = String(value).trim().toUpperCase();
     });
 
-// Fast matricule lookups (search box, report cards, barcode scanning)
-studentschema.index({ matricule: 1 });
+// Fast matricule lookups (search box, report cards, barcode scanning) AND a
+// hard database-level guarantee that every real admission number is unique.
+// It is a PARTIAL index (matricule > "") so the "" default and any legacy row
+// without a matricule are not indexed — otherwise they would all collide on
+// the empty string. The matricule counter (services/matriculeService.js) plus
+// the pre-save duplicate check below already prevent collisions; this index is
+// the final backstop so two students can never share a matricule.
+studentschema.index(
+    { matricule: 1 },
+    { unique: true, partialFilterExpression: { matricule: { $gt: "" } }, name: "matricule_unique" }
+);
 studentschema.index({ enrollmentYear: 1 });
 studentschema.index({ section: 1 });
 // Sorted + paginated listings of the Students screen (section/class scoped)

@@ -529,6 +529,9 @@ router.post("/students", async (req, res) => {
         });
     } catch (error) {
         if (error.name === "ValidationError") {
+            // TEMP DIAGNOSTIC
+            console.log("SECTION-CHECK-DIAG body:", JSON.stringify(studentData));
+            console.log("SECTION-CHECK-DIAG errors:", Object.entries(error.errors).map(([k, v]) => `${k}: ${v.message}`).join(" | "));
             const errors = Object.values(error.errors).map(err => err.message);
             return res.status(400).json({
                 success: false,
@@ -544,6 +547,17 @@ router.post("/students", async (req, res) => {
                 message: error.message,
                 matricule: error.matricule,
                 conflict: error.conflict
+            });
+        }
+
+        // Backstop: the unique matricule index rejected the insert (two students
+        // ended up with the same admission number in a concurrent-save race).
+        // Report it clearly instead of leaking a generic 500.
+        if (error.code === 11000 && error.keyPattern && error.keyPattern.matricule) {
+            return res.status(409).json({
+                success: false,
+                message: "That admission number (matricule) is already in use. Please try again.",
+                matricule: error.keyValue && error.keyValue.matricule
             });
         }
 

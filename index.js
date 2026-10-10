@@ -201,6 +201,16 @@ app.post("/api/sync", async (req, res, next) => {
 });
 
 // API routes
+// TEMP DIAGNOSTIC: log the exact body the browser sends for student creation
+app.use("/api", (req, res, next) => {
+    if (req.method === "POST" && req.path === "/students") {
+        try {
+            const fs = require("fs");
+            fs.appendFileSync(process.cwd() + "/students-http-diag.log", JSON.stringify(req.body) + "\n");
+        } catch (e) { /* ignore */ }
+    }
+    next();
+});
 app.use("/api", marks);
 app.use("/api", schoolclass);
 app.use("/api", student);
