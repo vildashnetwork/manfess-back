@@ -49,7 +49,7 @@ const studentschema = new mongoose.Schema({
     },
     parentName: {
         type: String,
-        required: true
+        default: ""
     },
     parentPhone: {
         type: String,
@@ -57,7 +57,7 @@ const studentschema = new mongoose.Schema({
     },
     address: {
         type: String,
-        required: true
+        default: ""
     },
     photoUrl: {
         type: String,

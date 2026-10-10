@@ -5,8 +5,7 @@ const schoolClassSchema = new mongoose.Schema({
     className: {
         type: String,
         enum: [
-            "Beginers1",
-            "Beginers2",
+            "Beginers",
             "Olevel 3",
             "Olevel 4",
             "Olevel 5",

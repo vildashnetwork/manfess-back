@@ -1,7 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import Subject from "../models/Subject.js"; // Adjust the path as needed
-import { buildInclusiveSectionFilter } from "../utils/schoolSection.js";
+import { buildInclusiveSectionFilter, normalizeSchoolSection } from "../utils/schoolSection.js";
 
 const router = express.Router();
 const sectionFilter = (req) => buildInclusiveSectionFilter(req, "section");

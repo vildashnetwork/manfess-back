@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import Student from "../models/Students.js";
 import SchoolClass from "../models/SchoolClass.js";
 import { storeStudentPhoto } from "../services/cloudinaryStudentPhotos.js";
-import { buildInclusiveSectionFilter } from "../utils/schoolSection.js";
+import { buildInclusiveSectionFilter, normalizeSchoolSection } from "../utils/schoolSection.js";
 import {
     generateMatricule,
     previewMatricule,
@@ -476,12 +476,11 @@ router.post("/students", async (req, res) => {
             return res.status(400).json({ success: false, message: "Select a valid class before enrolling the student" });
         }
 
-        if (!studentData.section) {
-            studentData.section = normalizeSchoolSection(schoolClass.schoolSection || 'englophone', 'englophone');
+        if (!schoolClass.schoolSection) {
+            schoolClass.schoolSection = normalizeSchoolSection(studentData.section || 'englophone', 'englophone');
+            await schoolClass.save().catch(() => { });
         }
-        if (schoolClass.schoolSection && studentData.section !== schoolClass.schoolSection) {
-            return res.status(400).json({ success: false, message: "Student section must match the selected class section" });
-        }
+        studentData.section = normalizeSchoolSection(schoolClass.schoolSection, 'englophone');
 
         if (schoolClass.className !== "Graduated" && Number(schoolClass.tuitionFee) <= 0) {
             return res.status(400).json({ success: false, message: "Configure tuition for this class before enrolling students" });
@@ -490,7 +489,7 @@ router.post("/students", async (req, res) => {
         const registrationFeeRequired = Boolean(schoolClass.registrationFeeRequired);
         const registrationFeeAmount = registrationFeeRequired ? Number(schoolClass.registrationFeeAmount) || 0 : 0;
         const registrationPaid = Number(studentData.registrationFeePaid) || 0;
-        if (tuitionPaid > Number(schoolClass.tuitionFee) || registrationPaid > registrationFeeAmount) {
+        if (tuitionPaid + registrationPaid > Number(schoolClass.tuitionFee) + registrationFeeAmount) {
             return res.status(400).json({ success: false, message: "Initial payments cannot exceed the configured class fees" });
         }
         Object.assign(studentData, {
@@ -611,12 +610,11 @@ router.post("/students/bulk", async (req, res) => {
             if (!schoolClass) {
                 return res.status(400).json({ success: false, message: `Invalid class for ${payload.fullName}` });
             }
-            if (!payload.section) {
-                payload.section = normalizeSchoolSection(schoolClass.schoolSection || 'englophone', 'englophone');
+            if (!schoolClass.schoolSection) {
+                schoolClass.schoolSection = normalizeSchoolSection(payload.section || 'englophone', 'englophone');
+                await schoolClass.save().catch(() => { });
             }
-            if (schoolClass.schoolSection && payload.section !== schoolClass.schoolSection) {
-                return res.status(400).json({ success: false, message: `Student section does not match class section for ${payload.fullName}` });
-            }
+            payload.section = normalizeSchoolSection(schoolClass.schoolSection, 'englophone');
             if (schoolClass.className !== "Graduated" && Number(schoolClass.tuitionFee) <= 0) {
                 return res.status(400).json({ success: false, message: `Configure tuition for ${schoolClass.className} before bulk enrollment` });
             }
@@ -905,12 +903,11 @@ router.put("/students/:id", async (req, res) => {
             if (!schoolClass) {
                 return res.status(400).json({ success: false, message: "Select a valid class" });
             }
-            if (!payload.section) {
-                payload.section = normalizeSchoolSection(schoolClass.schoolSection || 'englophone', 'englophone');
+            if (!schoolClass.schoolSection) {
+                schoolClass.schoolSection = normalizeSchoolSection(payload.section || 'englophone', 'englophone');
+                await schoolClass.save().catch(() => { });
             }
-            if (schoolClass.schoolSection && payload.section !== schoolClass.schoolSection) {
-                return res.status(400).json({ success: false, message: "Student section must match the selected class section" });
-            }
+            payload.section = normalizeSchoolSection(schoolClass.schoolSection, 'englophone');
             if (schoolClass.className !== "Graduated" && Number(schoolClass.tuitionFee) <= 0) {
                 return res.status(400).json({ success: false, message: "Configure tuition for this class before assigning students" });
             }
@@ -1019,10 +1016,11 @@ router.patch("/students/:id", async (req, res) => {
         if (payload.classId) {
             const schoolClass = await SchoolClass.findById(payload.classId);
             if (schoolClass) {
-                if (!payload.section) payload.section = normalizeSchoolSection(schoolClass.schoolSection || 'englophone', 'englophone');
-                if (schoolClass.schoolSection && payload.section !== schoolClass.schoolSection) {
-                    return res.status(400).json({ success: false, message: "Student section must match the selected class section" });
+                if (!schoolClass.schoolSection) {
+                    schoolClass.schoolSection = normalizeSchoolSection(payload.section || 'englophone', 'englophone');
+                    await schoolClass.save().catch(() => { });
                 }
+                payload.section = normalizeSchoolSection(schoolClass.schoolSection, 'englophone');
             }
         }
 

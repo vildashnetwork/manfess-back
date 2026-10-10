@@ -1,14 +1,14 @@
 import express from "express";
 import mongoose from "mongoose";
 import SchoolClass from "../models/SchoolClass.js";
-import { buildInclusiveSectionFilter } from "../utils/schoolSection.js";
+import { buildInclusiveSectionFilter, normalizeSchoolSection } from "../utils/schoolSection.js";
 
 const router = express.Router();
 
 const sectionFilter = (req) => buildInclusiveSectionFilter(req, "schoolSection");
 const isClassLevelAllowed = (className, section) => {
     void section;
-    return ["Form 1", "Form 2", "Form 3", "Form 4", "Form 5", "Lower 6th", "Upper 6th", "Graduated"].includes(className);
+    return ["Beginers", "Olevel 3", "Olevel 4", "Olevel 5", "Alevel", "Form 1", "Form 2", "Form 3", "Form 4", "Form 5", "Lower 6th", "Upper 6th", "Graduated", "6ème", "5ème", "4ème", "3ème", "Seconde", "Première", "Terminale"].includes(className);
 };
 
 // ==================== GET ROUTES ====================
@@ -290,6 +290,12 @@ router.put("/classes/:id", async (req, res) => {
         if (classData.academicYear && !classData.acedemicYear) {
             classData.acedemicYear = classData.academicYear;
             delete classData.academicYear;
+        }
+
+        // Self-heal stale clients that sent the class arm ("A".."D") as the
+        // school section: fall back to the stored value, then to englophone.
+        if (classData.schoolSection && !["englophone"].includes(String(classData.schoolSection).trim())) {
+            delete classData.schoolSection;
         }
 
         // Check if class exists
